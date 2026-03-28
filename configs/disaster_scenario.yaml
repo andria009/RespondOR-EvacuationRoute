@@ -1,0 +1,102 @@
+# RespondOR-EvacuationRoute — Example Disaster Scenario Configuration
+# Mount Merapi Eruption Scenario, Yogyakarta, Indonesia
+
+scenario_id: "merapi_eruption_2024"
+output_dir: "output/merapi_eruption_2024"
+log_level: "INFO"
+
+# ------------------------------------------------------------------ #
+# DISASTER INFORMATION
+# ------------------------------------------------------------------ #
+disaster:
+  name: "Merapi Eruption 2024"
+  type: "volcano"               # earthquake|volcano|flood|landslide
+  lat: -7.5407                  # Mount Merapi summit
+  lon: 110.4457
+  severity: 0.8                 # 0.0-1.0
+
+# ------------------------------------------------------------------ #
+# REGION OF INTEREST
+# ------------------------------------------------------------------ #
+region:
+  type: "circle"                # circle|bbox
+  center: [-7.5407, 110.4457]
+  radius_km: 20.0
+  # Alternatively, use bounding box:
+  # type: "bbox"
+  # bbox: [-7.8, 110.2, -7.3, 110.7]   # [south, west, north, east]
+
+# ------------------------------------------------------------------ #
+# DATA EXTRACTION OPTIONS
+# ------------------------------------------------------------------ #
+extraction:
+  osm_cache_dir: "data/raw/osm_cache/merapi"
+  use_cached_osm: true
+  network_type: "all"           # drive|walk|all
+  village_admin_level: 9        # 9=desa/village, 8=kecamatan, 7=kabupaten
+  inarisk_batch_size: 20
+  inarisk_rate_limit_s: 1.0
+
+  # Population data (optional; estimation used if not provided)
+  population_csv: null          # "data/examples/merapi_population.csv"
+
+  # Shelter capacity (optional; estimation from area if not provided)
+  shelter_capacity_csv: null    # "data/examples/merapi_shelters.csv"
+
+  # Area-based estimation parameters
+  m2_per_person: 2.0            # m² floor area per shelter occupant
+  default_pop_density: 800.0    # persons/km² for Yogyakarta region
+
+  # Pre-extracted network files (skip OSM extraction if provided)
+  # preloaded_network_json: "data/processed/merapi_network.json"
+  # preloaded_network_pycgr: "data/processed/merapi.pycgr"
+  # preloaded_villages_geojson: "data/processed/merapi_villages.geojson"
+  # preloaded_shelters_geojson: "data/processed/merapi_shelters.geojson"
+
+# ------------------------------------------------------------------ #
+# ROUTING CONFIGURATION
+# ------------------------------------------------------------------ #
+routing:
+  max_routes_per_village: 3
+  max_route_risk_threshold: 0.8   # Discard routes with max_risk > this
+
+  # Composite score weights (must sum to 1.0)
+  weight_distance:     0.25       # Prefer shorter routes
+  weight_risk:         0.45       # Strong penalty for hazardous routes
+  weight_road_quality: 0.20       # Prefer better roads
+  weight_time:         0.10       # Prefer faster routes
+
+  # Congestion parameters
+  bpr_alpha: 0.15
+  bpr_beta: 4.0
+
+  # Assignment method: greedy|lp
+  assignment_method: "greedy"
+
+# ------------------------------------------------------------------ #
+# SIMULATION SETTINGS (GAMA-platform)
+# ------------------------------------------------------------------ #
+simulation:
+  gama_executable: "gama-headless"
+  gaml_model_path: "simulation/models/EvacuationModel.gaml"
+  gama_output_dir: "output/simulation/merapi"
+  n_runs: 5
+  max_simulation_steps: 500
+  time_step_minutes: 1.0
+  parallel_runs: 1              # parallel GAMA processes (for HPC)
+  random_seed_base: 42
+
+# ------------------------------------------------------------------ #
+# EXECUTION MODE
+# ------------------------------------------------------------------ #
+execution:
+  mode: "naive"                 # naive|parallel|hpc
+  n_workers: 4                  # used by parallel mode; ignored by hpc (MPI rank count is used)
+
+  # HPC/MPI settings (only for mode=hpc)
+  # mpi_hosts_file: null        # optional hostfile for mpirun outside SLURM
+  #
+  # To run in HPC mode, launch via SLURM:
+  #   sbatch hpc/slurm_job.sh
+  # Or directly with mpirun:
+  #   mpirun -n 8 python -m src.main --config configs/disaster_scenario.yaml --mode hpc

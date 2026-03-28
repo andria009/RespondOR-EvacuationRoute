@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>id.ac.ui.respondor</groupId>
+    <artifactId>gama-respondor-plugin</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>GAMA RespondOR Plugin</name>
+    <description>
+        GAMA platform plugin for RespondOR-EvacuationRoute.
+        Provides GAML operators for OSM data access and InaRISK queries.
+    </description>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <gama.version>1.9.3</gama.version>
+    </properties>
+
+    <repositories>
+        <!-- GAMA platform Maven repository -->
+        <repository>
+            <id>gama-platform</id>
+            <url>https://github.com/gama-platform/gama/raw/master/maven-repo</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <!-- GAMA core annotations (provided by GAMA platform) -->
+        <dependency>
+            <groupId>msi.gama</groupId>
+            <artifactId>msi.gama.core</artifactId>
+            <version>${gama.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- JSON parsing -->
+        <dependency>
+            <groupId>org.json</groupId>
+            <artifactId>json</artifactId>
+            <version>20231013</version>
+        </dependency>
+
+        <!-- Testing -->
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>4.13.2</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <addClasspath>true</addClasspath>
+                        </manifest>
+                        <manifestEntries>
+                            <Bundle-SymbolicName>id.ac.ui.respondor</Bundle-SymbolicName>
+                            <Bundle-Version>1.0.0</Bundle-Version>
+                            <Bundle-Name>RespondOR GAMA Plugin</Bundle-Name>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <shadedArtifactAttached>true</shadedArtifactAttached>
+                            <shadedClassifierName>with-dependencies</shadedClassifierName>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

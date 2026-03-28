@@ -1,0 +1,53 @@
+# RespondOR-EvacuationRoute — Python Dependencies
+# Install: pip install -r requirements.txt
+# Tested on Python 3.14.2 (pyenv virtualenv respondor-evroute)
+
+# ---- Core geospatial ----
+osmnx>=2.1.0
+geopandas>=1.1.0
+shapely>=2.1.0
+pyproj>=3.7.0
+pyogrio>=0.12.0          # geopandas 1.x I/O backend (replaces fiona)
+
+# ---- Network analysis ----
+networkx>=3.6.0
+
+# ---- Data processing ----
+pandas>=3.0.0
+numpy>=2.4.0
+
+# ---- HTTP / API ----
+requests>=2.33.0
+urllib3>=2.6.0
+certifi>=2026.0.0
+
+# ---- Optimization (for LP assignment) ----
+scipy>=1.17.0
+
+# ---- Visualization ----
+matplotlib>=3.10.0
+pillow>=12.0.0           # matplotlib image backend
+folium>=0.20.0
+branca>=0.8.0
+xyzservices>=2025.0.0    # tile provider registry (folium/matplotlib dep)
+
+# ---- Config ----
+pyyaml>=6.0.3
+
+# ---- Progress bars ----
+tqdm>=4.67.0
+
+# ---- Testing ----
+pytest>=9.0.0
+pytest-cov>=7.1.0
+coverage>=7.13.0
+
+# ---- Optional: HPC/MPI ----
+# Requires an MPI runtime (e.g. OpenMPI or Intel MPI) installed on the system.
+# macOS:  brew install open-mpi && pip install mpi4py
+# Linux:  module load openmpi/4.1 && pip install mpi4py
+# mpi4py>=3.1.4
+
+# ---- Optional: Jupyter notebooks ----
+# jupyter>=1.0.0
+# ipywidgets>=8.0.0
