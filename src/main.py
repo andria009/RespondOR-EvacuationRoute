@@ -1,25 +1,22 @@
 """
 RespondOR-EvacuationRoute — Main Entrypoint
-Disaster evacuation route optimization and simulation system.
+Disaster evacuation route optimization system.
 
 Usage:
   # Run full pipeline (naive mode):
-  python -m src.main --config configs/disaster_scenario.yaml
+  python -m src.main --config configs/demak_flood_2024.yaml
 
   # Parallel mode (multiprocessing, single node):
-  python -m src.main --config configs/disaster_scenario.yaml --mode parallel --workers 8
+  python -m src.main --config configs/demak_flood_2024.yaml --mode parallel --workers 8
 
   # HPC mode (MPI, launch via srun/mpirun):
-  srun --mpi=pmix -n 32 python -m src.main --config configs/disaster_scenario.yaml --mode hpc
-
-  # Run benchmark comparison:
-  python -m src.main --config configs/disaster_scenario.yaml --benchmark
-
-  # Run simulation only (after optimization):
-  python -m src.main --config configs/disaster_scenario.yaml --simulate-only
+  srun --mpi=pmix -n 32 python -m src.main --config configs/demak_flood_2024.yaml --mode hpc
 
   # Generate visualization only:
-  python -m src.main --config configs/disaster_scenario.yaml --visualize-only
+  python -m src.main --config configs/demak_flood_2024.yaml --visualize-only
+
+  # Prepare GAMA simulation inputs (after optimization):
+  python -m experiments.prepare_gama_inputs --config configs/demak_flood_2024.yaml
 """
 
 import argparse
@@ -47,12 +44,6 @@ def parse_args():
                    help="Execution mode (overrides config)")
     p.add_argument("--workers", "-w", type=int,
                    help="Number of parallel workers (overrides config; ignored in HPC/MPI mode)")
-    p.add_argument("--benchmark", action="store_true",
-                   help="Run all modes and compare performance")
-    p.add_argument("--simulate", action="store_true",
-                   help="Also run GAMA simulation after optimization")
-    p.add_argument("--simulate-only", action="store_true",
-                   help="Run GAMA simulation only (requires existing optimization output)")
     p.add_argument("--visualize-only", action="store_true",
                    help="Regenerate visualizations from existing results")
     p.add_argument("--output-dir", "-o",
@@ -118,6 +109,61 @@ def save_optimization_result(result, villages, shelters, routes_by_village, outp
     return summary
 
 
+def _load_viz_extras(config) -> tuple:
+    """
+    Load village/shelter polygon geometries and node_coords dict for rich visualization.
+    Returns (village_geoms, shelter_geoms, node_coords) — dicts keyed by ID / node_id.
+    Falls back gracefully if files are missing.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    from shapely.geometry import shape as _shape
+
+    cache_dir = _Path(config.extraction.osm_cache_dir)
+
+    def _latest(pattern):
+        candidates = sorted(cache_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+        return candidates[-1] if candidates else None
+
+    def _load_geojson_geoms(path, id_field):
+        geoms = {}
+        try:
+            with open(path) as f:
+                for feat in _json.load(f).get("features", []):
+                    fid = str(feat.get("properties", {}).get(id_field, ""))
+                    g = feat.get("geometry")
+                    if fid and g:
+                        try:
+                            geoms[fid] = _shape(g)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return geoms
+
+    vpath = (_Path(config.preloaded_villages_geojson)
+             if config.preloaded_villages_geojson else _latest("villages_*.geojson"))
+    spath = (_Path(config.preloaded_shelters_geojson)
+             if config.preloaded_shelters_geojson else _latest("shelters_*.geojson"))
+    npath = (_Path(config.preloaded_network_json)
+             if config.preloaded_network_json else _latest("network_*.json"))
+
+    village_geoms = _load_geojson_geoms(vpath, "village_id") if vpath and vpath.exists() else {}
+    shelter_geoms = _load_geojson_geoms(spath, "shelter_id") if spath and spath.exists() else {}
+
+    node_coords = {}
+    if npath and npath.exists():
+        try:
+            with open(npath) as f:
+                nd = _json.load(f)
+            for n in nd.get("nodes", []):
+                node_coords[n["id"]] = (n["lat"], n["lon"])
+        except Exception:
+            pass
+
+    return village_geoms, shelter_geoms, node_coords
+
+
 def main():
     args = parse_args()
 
@@ -140,100 +186,54 @@ def main():
     logger.info("=" * 60)
 
     # ------------------------------------------------------------------ #
-    # BENCHMARK mode: run all modes and compare
-    # ------------------------------------------------------------------ #
-    if args.benchmark:
-        from src.benchmark.benchmark_runner import BenchmarkRunner
-        benchmarker = BenchmarkRunner(config)
-        results = benchmarker.run_all(run_hpc=(config.execution.hpc_framework is not None))
-        return
-
-    # ------------------------------------------------------------------ #
     # OPTIMIZATION
     # ------------------------------------------------------------------ #
-    if not args.simulate_only:
-        result, villages, shelters, routes_by_village, timings = run_optimization(
-            config,
-            mode_override=args.mode,
-            workers_override=args.workers,
-        )
+    result, villages, shelters, routes_by_village, timings = run_optimization(
+        config,
+        mode_override=args.mode,
+        workers_override=args.workers,
+    )
 
-        # Save results
-        summary = save_optimization_result(
-            result, villages, shelters, routes_by_village, config.output_dir
-        )
+    # Save results
+    summary = save_optimization_result(
+        result, villages, shelters, routes_by_village, config.output_dir
+    )
 
-        # Print summary
-        logger.info("\n" + "=" * 50)
-        logger.info(f"EVACUATION SUMMARY")
-        logger.info(f"  Total population:  {result.total_population:,}")
-        logger.info(f"  Evacuated:         {result.total_evacuated:,} ({100*result.evacuation_ratio:.1f}%)")
-        logger.info(f"  Unmet demand:      {result.total_unmet:,}")
-        logger.info(f"  Avg route risk:    {result.avg_route_risk:.3f}")
-        logger.info(f"  Avg distance:      {result.avg_route_distance_km:.1f} km")
-        logger.info(f"  Avg travel time:   {result.avg_route_time_min:.0f} min")
-        logger.info(f"  Runtime:           {result.runtime_s:.2f}s")
-        logger.info("=" * 50)
+    # Print summary
+    logger.info("\n" + "=" * 50)
+    logger.info(f"EVACUATION SUMMARY")
+    logger.info(f"  Total population:  {result.total_population:,}")
+    logger.info(f"  Evacuated:         {result.total_evacuated:,} ({100*result.evacuation_ratio:.1f}%)")
+    logger.info(f"  Unmet demand:      {result.total_unmet:,}")
+    logger.info(f"  Avg route risk:    {result.avg_route_risk:.3f}")
+    logger.info(f"  Avg distance:      {result.avg_route_distance_km:.1f} km")
+    logger.info(f"  Avg travel time:   {result.avg_route_time_min:.0f} min")
+    logger.info(f"  Runtime:           {result.runtime_s:.2f}s")
+    logger.info("=" * 50)
 
-        # Visualization
-        from src.visualization.visualizer import EvacuationVisualizer
-        viz = EvacuationVisualizer(config.output_dir)
+    # Visualization
+    from src.visualization.visualizer import EvacuationVisualizer
+    viz = EvacuationVisualizer(config.output_dir)
 
-        viz.create_interactive_map(
-            villages=villages,
-            shelters=shelters,
-            routes_by_village=routes_by_village,
-            disaster_location=(config.disaster.lat, config.disaster.lon),
-            disaster_type=config.disaster.disaster_type,
-        )
-        viz.create_evacuation_summary_chart(result)
-        viz.export_result_csv(result, villages, shelters)
-
-    # ------------------------------------------------------------------ #
-    # SIMULATION
-    # ------------------------------------------------------------------ #
-    if args.simulate or args.simulate_only:
-        if args.simulate_only:
-            # Load existing result
-            result_path = Path(config.output_dir) / "optimization_summary.json"
-            if not result_path.exists():
-                logger.error(f"No existing optimization result at {result_path}. "
-                             f"Run optimization first.")
-                sys.exit(1)
-            logger.info(f"Loaded existing optimization result from {result_path}")
-            # For simulate-only, we'd need to reconstruct objects — simplified here
-            return
-
-        from src.simulation.gama_orchestrator import GAMAOrchestrator
-        orchestrator = GAMAOrchestrator(
-            gama_executable=config.simulation.gama_executable,
-            gaml_model_path=config.simulation.gaml_model_path,
-            output_dir=config.simulation.gama_output_dir,
-            max_steps=config.simulation.max_simulation_steps,
-            n_runs=config.simulation.n_runs,
-            parallel_runs=config.simulation.parallel_runs,
-        )
-
-        logger.info(f"Running {config.simulation.n_runs} GAMA simulations...")
-        sim_outputs = orchestrator.run_simulation(
-            opt_result=result,
-            villages=villages,
-            shelters=shelters,
-            scenario_id=config.scenario_id,
-        )
-
-        stats = orchestrator.aggregate_outputs(sim_outputs)
-        logger.info("\nSIMULATION RESULTS:")
-        for k, v in stats.items():
-            logger.info(f"  {k}: {v:.3f}" if isinstance(v, float) else f"  {k}: {v}")
-
-        # Save simulation stats
-        sim_stats_path = Path(config.output_dir) / "simulation_stats.json"
-        with open(sim_stats_path, "w") as f:
-            json.dump(stats, f, indent=2)
-        logger.info(f"Simulation stats saved to {sim_stats_path}")
+    village_geoms, shelter_geoms, node_coords = _load_viz_extras(config)
+    viz.create_interactive_map(
+        villages=villages,
+        shelters=shelters,
+        routes_by_village=routes_by_village,
+        disaster_location=(config.disaster.lat, config.disaster.lon),
+        disaster_type=config.disaster.disaster_type,
+        village_geoms=village_geoms,
+        shelter_geoms=shelter_geoms,
+        node_coords=node_coords,
+        disaster_name=config.disaster.name,
+        region_radius_km=config.region.radius_km,
+    )
+    viz.create_evacuation_summary_chart(result)
+    viz.export_result_csv(result, villages, shelters)
 
     logger.info("Done.")
+    logger.info(f"  Prepare GAMA inputs: python -m experiments.prepare_gama_inputs "
+                f"--config {args.config}")
 
 
 if __name__ == "__main__":

@@ -234,36 +234,3 @@ class OptimizationResult:
         return self.total_evacuated / self.total_population
 
 
-@dataclass
-class SimulationOutput:
-    """Output from GAMA-platform simulation."""
-    scenario_id: str
-    run_id: int
-    total_saved: int
-    total_delayed: int
-    total_failed: int
-    evacuation_completion_ratio: float
-    avg_evacuation_time_min: float
-    worst_evacuation_time_min: float
-    bottleneck_road_ids: List[str]
-    overloaded_shelter_ids: List[str]
-    congestion_timeline: List[Dict[str, Any]]   # time -> edge_id -> flow
-    raw_output_path: Optional[str] = None
-
-
-@dataclass
-class BenchmarkResult:
-    """Computational performance result."""
-    scenario_id: str
-    mode: ExecutionMode
-    phase: str                          # extraction, graph_build, routing, optimization, simulation
-    n_workers: int
-    n_nodes: int
-    n_edges: int
-    n_villages: int
-    n_shelters: int
-    wall_time_s: float
-    cpu_time_s: float
-    peak_memory_mb: float
-    speedup: float = 1.0               # vs naive
-    efficiency: float = 1.0            # speedup / n_workers
