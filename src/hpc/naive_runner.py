@@ -137,6 +137,7 @@ class NaiveRunner:
             nodes, edges = extractor.extract_road_network(
                 region,
                 network_type=cfg.extraction.network_type,
+                road_types=cfg.extraction.road_types,
                 use_cache=cfg.extraction.use_cached_osm,
             )
 
@@ -149,8 +150,18 @@ class NaiveRunner:
             else:
                 villages = extractor.extract_villages(
                     region,
-                    admin_level=cfg.extraction.village_admin_level,
+                    admin_levels=cfg.extraction.village_admin_levels,
+                    population_density_per_km2=cfg.extraction.village_pop_density,
+                    max_population_per_village=cfg.extraction.village_max_pop,
                     use_cache=cfg.extraction.use_cached_osm,
+                    sources=cfg.extraction.village_sources,
+                    place_tags=cfg.extraction.village_place_tags,
+                    place_settings=cfg.extraction.village_place_settings,
+                    place_radius_m=cfg.extraction.village_place_radius_m,
+                    cluster_eps_m=cfg.extraction.village_cluster_eps_m,
+                    cluster_min_buildings=cfg.extraction.village_cluster_min_buildings,
+                    persons_per_dwelling=cfg.extraction.village_persons_per_dwelling,
+                    building_persons=cfg.extraction.village_building_persons,
                 )
 
             if cfg.preloaded_shelters_geojson:
@@ -158,6 +169,9 @@ class NaiveRunner:
             else:
                 shelters = extractor.extract_shelters(
                     region,
+                    shelter_tags=cfg.extraction.shelter_tags,
+                    min_area_m2=cfg.extraction.shelter_min_area_m2,
+                    m2_per_person=cfg.extraction.shelter_m2_per_person,
                     use_cache=cfg.extraction.use_cached_osm,
                 )
 
@@ -166,7 +180,7 @@ class NaiveRunner:
         pop_loader.apply_population(
             villages,
             population_csv=cfg.extraction.population_csv,
-            density_per_km2=cfg.extraction.default_pop_density,
+            density_per_km2=cfg.extraction.village_pop_density,
         )
 
         cap_loader = ShelterCapacityLoader()

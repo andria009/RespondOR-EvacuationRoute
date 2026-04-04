@@ -142,6 +142,7 @@ class ParallelRunner:
             else:
                 net_future = tpe.submit(extractor.extract_road_network, region,
                                         cfg.extraction.network_type,
+                                        cfg.extraction.road_types,
                                         cfg.extraction.use_cached_osm)
 
             if cfg.preloaded_poi_csv:
@@ -155,17 +156,34 @@ class ParallelRunner:
                     vil_future = tpe.submit(extractor.load_villages_from_geojson,
                                             cfg.preloaded_villages_geojson)
                 else:
-                    vil_future = tpe.submit(extractor.extract_villages, region,
-                                            cfg.extraction.village_admin_level,
-                                            cfg.extraction.use_cached_osm)
+                    vil_future = tpe.submit(
+                        extractor.extract_villages, region,
+                        cfg.extraction.village_admin_levels,
+                        cfg.extraction.village_pop_density,
+                        cfg.extraction.village_max_pop,
+                        cfg.extraction.use_cached_osm,
+                        cfg.extraction.village_sources,
+                        cfg.extraction.village_place_tags,
+                        cfg.extraction.village_place_settings,
+                        cfg.extraction.village_place_radius_m,
+                        cfg.extraction.village_cluster_eps_m,
+                        cfg.extraction.village_cluster_min_buildings,
+                        cfg.extraction.village_persons_per_dwelling,
+                        cfg.extraction.village_building_persons,
+                    )
 
                 # Shelters
                 if cfg.preloaded_shelters_geojson:
                     shel_future = tpe.submit(extractor.load_shelters_from_geojson,
                                              cfg.preloaded_shelters_geojson)
                 else:
-                    shel_future = tpe.submit(extractor.extract_shelters, region,
-                                             None, cfg.extraction.use_cached_osm)
+                    shel_future = tpe.submit(
+                        extractor.extract_shelters, region,
+                        cfg.extraction.shelter_tags,
+                        cfg.extraction.shelter_min_area_m2,
+                        cfg.extraction.shelter_m2_per_person,
+                        cfg.extraction.use_cached_osm,
+                    )
 
                 nodes, edges = net_future.result()
                 villages = vil_future.result()
