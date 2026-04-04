@@ -21,8 +21,9 @@ requests>=2.33.0
 urllib3>=2.6.0
 certifi>=2026.0.0
 
-# ---- Optimization (for LP assignment) ----
+# ---- Optimization (for LP assignment + building_clusters DBSCAN) ----
 scipy>=1.17.0
+scikit-learn>=1.6.0
 
 # ---- Visualization ----
 matplotlib>=3.10.0
