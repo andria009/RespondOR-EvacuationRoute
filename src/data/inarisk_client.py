@@ -42,7 +42,7 @@ INARISK_CONFIG = {
 }
 
 BASE_URL = "https://gis.bnpb.go.id/server/rest/services/inarisk"
-IDENTIFY_URL = "{base}/{service}/MapServer/{layer_id}/query"
+IDENTIFY_URL = "{base}/{service}/ImageServer/identify"
 
 
 def _latlon_to_mercator(lat: float, lon: float) -> Tuple[float, float]:
@@ -165,29 +165,21 @@ class InaRISKClient:
         return scores
 
     def _query_single_point(self, lat: float, lon: float, config: dict) -> float:
-        """Query risk score for a single point."""
+        """Query risk score for a single point via ImageServer identify."""
+        import json as _json
         x, y = _latlon_to_mercator(lat, lon)
         service = config["service"]
-        layer_id = config["layer_id"]
-        field = config["field"]
 
-        url = IDENTIFY_URL.format(
-            base=BASE_URL, service=service, layer_id=layer_id
-        )
+        url = IDENTIFY_URL.format(base=BASE_URL, service=service)
 
-        # Small buffer around point for polygon intersection
-        tolerance = 1000  # meters in mercator
         params = {
-            "geometry": f"{x},{y}",
+            "geometry": _json.dumps({
+                "x": x, "y": y,
+                "spatialReference": {"wkid": 102100},
+            }),
             "geometryType": "esriGeometryPoint",
-            "spatialRel": "esriSpatialRelIntersects",
-            "inSR": "102100",
-            "outFields": field,
-            "outSR": "4326",
-            "f": "json",
             "returnGeometry": "false",
-            "resultRecordCount": 1,
-            "where": "1=1",
+            "f": "json",
         }
 
         try:
@@ -198,20 +190,14 @@ class InaRISKClient:
             logger.debug(f"InaRISK query failed for ({lat},{lon}): {e}")
             return 0.0
 
-        features = data.get("features", [])
-        if not features:
-            return 0.0
-
-        attrs = features[0].get("attributes", {})
-        raw_val = attrs.get(field, attrs.get("INDEKS_BAHAYA", None))
-
-        if raw_val is None:
+        # ImageServer identify returns {"value": "0.85", ...}
+        raw_val = data.get("value")
+        if raw_val is None or str(raw_val).lower() in ("", "null", "nodata"):
             return 0.0
 
         try:
             score = float(raw_val)
-            # InaRISK values are typically 1-3 (low/medium/high)
-            # Normalize to [0, 1]
+            # Values are already in [0, 1]; guard against legacy [1, 3] scale
             if score > 1.0:
                 score = (score - 1.0) / 2.0  # 1→0.0, 2→0.5, 3→1.0
             return max(0.0, min(1.0, score))
