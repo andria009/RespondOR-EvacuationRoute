@@ -1,0 +1,120 @@
+# RespondOR-EvacuationRoute — Lewotobi Laki-Laki Eruption 2024
+# November 2024: Mount Lewotobi Laki-Laki (Flores, East Nusa Tenggara) erupted
+# explosively, killing 9 people and forcing evacuation of 10,000+ residents
+# across multiple kecamatan. Pyroclastic flows and heavy ashfall blocked roads;
+# the airport at Maumere was temporarily closed.
+# This is a remote island scenario: sparse road network, limited shelter
+# capacity, high-risk zone close to the summit with few viable escape corridors.
+
+scenario_id: "lewotobi_eruption_2024"
+output_dir: "output/lewotobi_eruption_2024"
+log_level: "INFO"
+
+# ------------------------------------------------------------------ #
+# DISASTER INFORMATION
+# ------------------------------------------------------------------ #
+disaster:
+  name: "Lewotobi Laki-Laki Eruption 2024"
+  type: "volcano"                # earthquake|volcano|flood|landslide
+  lat: -8.503                    # Lewotobi Laki-Laki summit, eastern Flores
+  lon: 122.775
+  severity: 0.90                 # explosive eruption with pyroclastic flows
+
+# ------------------------------------------------------------------ #
+# REGION OF INTEREST
+# ------------------------------------------------------------------ #
+region:
+  type: "circle"
+  center: [-8.503, 122.775]
+  radius_km: 15.0                # tight radius — Flores has limited road network
+  # Extend to 20 km if shelter coverage is insufficient after first run
+
+# ------------------------------------------------------------------ #
+# DATA EXTRACTION OPTIONS
+# ------------------------------------------------------------------ #
+extraction:
+  osm_cache_dir: "data/raw/osm_cache/lewotobi"
+  use_cached_osm: false
+  network_type: "all"            # include tracks — remote Flores villages often reachable only via dirt track
+
+  village_sources: [admin_boundary, place_nodes, building_clusters]
+  village_admin_levels: [9, 8, 7]
+  village_pop_density: 400.0     # rural NTT fallback — used for unknown place types
+  village_max_pop: 15000
+
+  # Per-place-tag footprint and density — calibrated for eastern Flores (NTT).
+  # Settlements are small, dispersed, and predominantly agricultural.
+  # Maumere city (~40 km away) is outside the 15 km radius so no large towns.
+  village_place_tags: [village, hamlet, town, suburb, quarter]
+  village_place_settings:
+    hamlet:  {radius_m:  200, pop_density:  250}  # dusun — 1–3 family clusters
+    village: {radius_m:  500, pop_density:  400}  # desa — sparse NTT settlement
+    town:    {radius_m: 1000, pop_density:  800}  # small kota kecamatan on Flores
+    suburb:  {radius_m:  600, pop_density: 1000}  # peri-urban fringe (unlikely here)
+    quarter: {radius_m:  300, pop_density:  800}  # kampung within a town
+
+  # building_clusters — NTT: smaller, looser clusters; extended family households
+  village_cluster_eps_m: 250     # tighter: dispersed kampung pattern
+  village_cluster_min_buildings: 5
+  village_persons_per_dwelling: 5.0   # larger NTT household size
+  village_building_persons:
+    house:       5.0   # extended household common in NTT
+    detached:    5.0
+    farm:        7.0   # multi-generational family compound
+    residential: 8.0
+    "yes":       5.0   # untagged — assume residential, NTT household size
+
+  inarisk_batch_size: 20
+  inarisk_rate_limit_s: 1.0
+
+  population_csv: null
+
+  # Volcano on remote island: puskesmas, churches (common assembly points in NTT),
+  # schools. Expand tags broadly — shelter options are limited.
+  shelter_tags:
+    amenity:   [hospital, clinic, school, place_of_worship]
+    emergency: [assembly_point, shelter]
+    building:  [school, civic, government, church]
+    landuse:   [military]        # koramil/kodim buildings used in past eruptions
+
+  shelter_min_area_m2: 200.0     # lower threshold — rural NTT has small buildings
+  shelter_m2_per_person: 2.0
+  shelter_capacity_csv: null
+
+  # Remote island: slower speeds, include tracks as they are the only access
+  road_types:
+    trunk:         {speed_kmh:  60, capacity_veh_h: 1600}
+    primary:       {speed_kmh:  50, capacity_veh_h: 1400}
+    secondary:     {speed_kmh:  40, capacity_veh_h: 1000}
+    tertiary:      {speed_kmh:  30, capacity_veh_h:  700}
+    unclassified:  {speed_kmh:  25, capacity_veh_h:  500}
+    residential:   {speed_kmh:  20, capacity_veh_h:  300}
+    service:       {speed_kmh:  15, capacity_veh_h:  150}
+    living_street: {speed_kmh:  10, capacity_veh_h:  100}
+    track:         {speed_kmh:  15, capacity_veh_h:   80}   # critical — only access for some villages
+    path:          {speed_kmh:   6, capacity_veh_h:   30}
+    footway:       {speed_kmh:   4, capacity_veh_h:   20}
+
+# ------------------------------------------------------------------ #
+# ROUTING CONFIGURATION
+# ------------------------------------------------------------------ #
+routing:
+  max_routes_per_village: 3
+  max_route_risk_threshold: 0.90  # high threshold — very few route alternatives on Flores
+
+  # Volcano on island: risk dominates (pyroclastic flows); accept longer routes
+  weight_distance:     0.20
+  weight_risk:         0.55       # strongest penalty — pyroclastic flow corridors fatal
+  weight_road_quality: 0.20       # important — many roads are unpaved tracks
+  weight_time:         0.05
+
+  bpr_alpha: 0.15
+  bpr_beta: 4.0
+  assignment_method: "greedy"
+
+# ------------------------------------------------------------------ #
+# EXECUTION MODE
+# ------------------------------------------------------------------ #
+execution:
+  mode: "naive"
+  n_workers: 4

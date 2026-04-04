@@ -1,0 +1,94 @@
+# RespondOR-EvacuationRoute — Tuban Earthquake 2024
+# 22 March 2024: M6.0 shallow earthquake (10 km depth) struck offshore Tuban,
+# East Java. Strongest earthquake felt in East Java in recent years — damaged
+# hundreds of buildings across Tuban, Lamongan, Bojonegoro, and Gresik.
+# No tsunami but significant structural damage. Dense coastal-urban scenario
+# with good road network but structural collapse blocking key corridors.
+
+scenario_id: "tuban_earthquake_2024"
+output_dir: "output/tuban_earthquake_2024"
+log_level: "INFO"
+
+# ------------------------------------------------------------------ #
+# DISASTER INFORMATION
+# ------------------------------------------------------------------ #
+disaster:
+  name: "Tuban Earthquake 2024"
+  type: "earthquake"             # earthquake|volcano|flood|landslide
+  lat: -6.538                    # Tuban town, closest major settlement to epicentre
+  lon: 112.045
+  severity: 0.70                 # M6.0 shallow — significant but not catastrophic
+
+# ------------------------------------------------------------------ #
+# REGION OF INTEREST
+# ------------------------------------------------------------------ #
+region:
+  type: "circle"
+  center: [-6.538, 112.045]
+  radius_km: 30.0                # covers Tuban, Lamongan western fringe, coastal strip
+
+# ------------------------------------------------------------------ #
+# DATA EXTRACTION OPTIONS
+# ------------------------------------------------------------------ #
+extraction:
+  osm_cache_dir: "data/raw/osm_cache/tuban"
+  use_cached_osm: false
+  network_type: "drive"          # earthquake: drive-only — foot routes impractical at scale
+
+  village_admin_levels: [9, 8, 7]
+  village_pop_density: 900.0     # mixed coastal-urban / agricultural East Java
+  village_max_pop: 80000         # Tuban kota has larger kelurahan
+
+  inarisk_batch_size: 20
+  inarisk_rate_limit_s: 1.0
+
+  population_csv: null
+
+  # Earthquake: hospitals critical; schools and stadiums used for displaced
+  shelter_tags:
+    amenity:   [hospital, school, university]
+    emergency: [assembly_point, shelter]
+    leisure:   [stadium, sports_centre]
+    building:  [school, civic, government, stadium]
+
+  shelter_min_area_m2: 600.0
+  shelter_m2_per_person: 2.0
+  shelter_capacity_csv: null
+
+  # Earthquake: road blockages captured via InaRISK risk score;
+  # keep full speed hierarchy — post-quake debris modelled as risk, not speed.
+  road_types:
+    motorway:      {speed_kmh: 100, capacity_veh_h: 2200}
+    trunk:         {speed_kmh:  80, capacity_veh_h: 2000}
+    primary:       {speed_kmh:  60, capacity_veh_h: 1800}
+    secondary:     {speed_kmh:  50, capacity_veh_h: 1500}
+    tertiary:      {speed_kmh:  40, capacity_veh_h: 1200}
+    unclassified:  {speed_kmh:  30, capacity_veh_h:  800}
+    residential:   {speed_kmh:  30, capacity_veh_h:  600}
+    service:       {speed_kmh:  20, capacity_veh_h:  400}
+    living_street: {speed_kmh:  15, capacity_veh_h:  200}
+    track:         {speed_kmh:  15, capacity_veh_h:  100}
+
+# ------------------------------------------------------------------ #
+# ROUTING CONFIGURATION
+# ------------------------------------------------------------------ #
+routing:
+  max_routes_per_village: 3
+  max_route_risk_threshold: 0.80
+
+  # Earthquake: balanced — many routes may be partially blocked; spread load
+  weight_distance:     0.25
+  weight_risk:         0.45
+  weight_road_quality: 0.20
+  weight_time:         0.10
+
+  bpr_alpha: 0.15
+  bpr_beta: 4.0
+  assignment_method: "greedy"
+
+# ------------------------------------------------------------------ #
+# EXECUTION MODE
+# ------------------------------------------------------------------ #
+execution:
+  mode: "naive"
+  n_workers: 4

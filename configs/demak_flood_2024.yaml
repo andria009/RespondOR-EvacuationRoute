@@ -1,0 +1,94 @@
+# RespondOR-EvacuationRoute — Demak Flood 2024
+# February 2024: prolonged heavy rain and Wulan River levee breaches inundated
+# 4 kecamatan in Demak Regency (Central Java), displacing ~90,000 people.
+# This is a coastal-plain flood scenario: wide, low-lying area, dense settlements,
+# many roads submerged → route risk and road capacity are critical constraints.
+
+scenario_id: "demak_flood_2024"
+output_dir: "output/demak_flood_2024"
+log_level: "INFO"
+
+# ------------------------------------------------------------------ #
+# DISASTER INFORMATION
+# ------------------------------------------------------------------ #
+disaster:
+  name: "Demak Flood 2024"
+  type: "flood"                  # earthquake|volcano|flood|landslide
+  lat: -6.894                    # Demak town centre (flood epicentre)
+  lon: 110.633
+  severity: 0.85                 # large-scale, multi-day inundation
+
+# ------------------------------------------------------------------ #
+# REGION OF INTEREST
+# ------------------------------------------------------------------ #
+region:
+  type: "circle"
+  center: [-6.894, 110.633]
+  radius_km: 25.0                # covers Demak, Kudus, and eastern Semarang fringe
+
+# ------------------------------------------------------------------ #
+# DATA EXTRACTION OPTIONS
+# ------------------------------------------------------------------ #
+extraction:
+  osm_cache_dir: "data/raw/osm_cache/demak"
+  use_cached_osm: false          # set true after first run
+  network_type: "all"
+
+  village_admin_levels: [9, 8, 7]
+  village_pop_density: 1200.0    # dense coastal-plain settlements
+  village_max_pop: 50000
+
+  inarisk_batch_size: 20
+  inarisk_rate_limit_s: 1.0
+
+  population_csv: null
+
+  # Flood shelters: schools and community halls used heavily in Demak 2024
+  shelter_tags:
+    amenity:   [hospital, school, community_centre]
+    emergency: [assembly_point, shelter]
+    building:  [school, civic, public]
+
+  shelter_min_area_m2: 400.0     # include smaller community halls
+  shelter_m2_per_person: 2.5     # more space per person during flood
+  shelter_capacity_csv: null
+
+  # Flood-affected road speeds: submerged/damaged roads removed at routing stage
+  # via InaRISK risk threshold — do not remove road types here.
+  road_types:
+    motorway:      {speed_kmh: 100, capacity_veh_h: 2200}
+    trunk:         {speed_kmh:  80, capacity_veh_h: 2000}
+    primary:       {speed_kmh:  60, capacity_veh_h: 1800}
+    secondary:     {speed_kmh:  50, capacity_veh_h: 1500}
+    tertiary:      {speed_kmh:  40, capacity_veh_h: 1200}
+    unclassified:  {speed_kmh:  30, capacity_veh_h:  800}
+    residential:   {speed_kmh:  20, capacity_veh_h:  600}  # lower in flood-prone grid
+    service:       {speed_kmh:  15, capacity_veh_h:  400}
+    living_street: {speed_kmh:  10, capacity_veh_h:  200}
+    track:         {speed_kmh:   8, capacity_veh_h:   50}
+    path:          {speed_kmh:   5, capacity_veh_h:   30}
+    footway:       {speed_kmh:   4, capacity_veh_h:   30}
+
+# ------------------------------------------------------------------ #
+# ROUTING CONFIGURATION
+# ------------------------------------------------------------------ #
+routing:
+  max_routes_per_village: 3
+  max_route_risk_threshold: 0.75  # stricter — flooded roads are impassable
+
+  # Flood: prioritise risk avoidance and distance over time
+  weight_distance:     0.30
+  weight_risk:         0.50       # dominant — avoid inundated corridors
+  weight_road_quality: 0.15
+  weight_time:         0.05
+
+  bpr_alpha: 0.15
+  bpr_beta: 4.0
+  assignment_method: "greedy"
+
+# ------------------------------------------------------------------ #
+# EXECUTION MODE
+# ------------------------------------------------------------------ #
+execution:
+  mode: "naive"
+  n_workers: 4

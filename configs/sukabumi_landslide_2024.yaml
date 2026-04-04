@@ -1,0 +1,120 @@
+# RespondOR-EvacuationRoute — Sukabumi Landslide 2024
+# December 2024: simultaneous landslides across Sukabumi and Bogor Regencies
+# (West Java) following extreme rainfall. Multiple villages cut off by road
+# blockages; dozens killed, thousands displaced.
+# This is a highland rural scenario: narrow mountain roads, limited route
+# options, settlements isolated by slides → road quality and distance weights
+# are critical; many paths may be the only viable escape route.
+
+scenario_id: "sukabumi_landslide_2024"
+output_dir: "output/sukabumi_landslide_2024"
+log_level: "INFO"
+
+# ------------------------------------------------------------------ #
+# DISASTER INFORMATION
+# ------------------------------------------------------------------ #
+disaster:
+  name: "Sukabumi Landslide 2024"
+  type: "landslide"              # earthquake|volcano|flood|landslide
+  lat: -7.123                    # Cisolok sub-district, worst-affected area
+  lon: 106.727
+  severity: 0.75
+
+# ------------------------------------------------------------------ #
+# REGION OF INTEREST
+# ------------------------------------------------------------------ #
+region:
+  type: "circle"
+  center: [-7.123, 106.727]
+  radius_km: 18.0                # covers landslide-prone belt from Cisolok to Palabuhanratu
+
+# ------------------------------------------------------------------ #
+# DATA EXTRACTION OPTIONS
+# ------------------------------------------------------------------ #
+extraction:
+  osm_cache_dir: "data/raw/osm_cache/sukabumi"
+  use_cached_osm: false
+  network_type: "all"            # include paths — highland villages often only reachable on foot
+
+  village_sources: [admin_boundary, place_nodes, building_clusters]
+  village_admin_levels: [9, 8, 7]
+  village_pop_density: 600.0     # highland West Java fallback for unknown place types
+  village_max_pop: 20000
+
+  # Per-place-tag footprint and density — calibrated for Cisolok–Palabuhanratu
+  # highland belt. Terrain is steep; settlements cluster in narrow valleys and
+  # ridgelines. Palabuhanratu (small coastal town) is ~15 km from center.
+  village_place_tags: [village, hamlet, town, suburb, quarter]
+  village_place_settings:
+    hamlet:  {radius_m:  250, pop_density:  400}  # dusun on hillside — small
+    village: {radius_m:  650, pop_density:  600}  # desa in valley floor
+    town:    {radius_m: 1200, pop_density: 2000}  # Palabuhanratu / Cisolok town
+    suburb:  {radius_m:  800, pop_density: 2500}  # peri-urban around Palabuhanratu
+    quarter: {radius_m:  400, pop_density: 2000}  # kampung within town
+
+  # building_clusters — highland West Java: denser clusters than NTT,
+  # but buildings more scattered on slopes than lowland Java
+  village_cluster_eps_m: 300
+  village_cluster_min_buildings: 8
+  village_persons_per_dwelling: 4.0   # typical West Java household
+  village_building_persons:
+    house:       4.0
+    detached:    4.0
+    semidetached_house: 3.5
+    terrace:     3.5   # row houses more common near Palabuhanratu coast
+    residential: 6.0
+    farm:        5.5   # smallholder farming households in highlands
+    "yes":       4.0   # untagged buildings
+
+  inarisk_batch_size: 20
+  inarisk_rate_limit_s: 1.0
+
+  population_csv: null
+
+  # Landslide: puskesmas (clinics) and schools used as shelters; government halls
+  shelter_tags:
+    amenity:   [hospital, clinic, school]
+    emergency: [assembly_point, shelter]
+    building:  [school, civic, government]
+
+  shelter_min_area_m2: 300.0     # include small rural puskesmas
+  shelter_m2_per_person: 2.0
+  shelter_capacity_csv: null
+
+  road_types:
+    motorway:      {speed_kmh: 100, capacity_veh_h: 2200}
+    trunk:         {speed_kmh:  70, capacity_veh_h: 1800}
+    primary:       {speed_kmh:  50, capacity_veh_h: 1600}
+    secondary:     {speed_kmh:  40, capacity_veh_h: 1200}
+    tertiary:      {speed_kmh:  30, capacity_veh_h:  900}
+    unclassified:  {speed_kmh:  25, capacity_veh_h:  600}
+    residential:   {speed_kmh:  20, capacity_veh_h:  400}
+    service:       {speed_kmh:  15, capacity_veh_h:  200}
+    living_street: {speed_kmh:  10, capacity_veh_h:  100}
+    track:         {speed_kmh:  10, capacity_veh_h:   80}   # critical in highlands
+    path:          {speed_kmh:   6, capacity_veh_h:   30}   # foot-only escape routes
+    footway:       {speed_kmh:   4, capacity_veh_h:   30}
+
+# ------------------------------------------------------------------ #
+# ROUTING CONFIGURATION
+# ------------------------------------------------------------------ #
+routing:
+  max_routes_per_village: 3
+  max_route_risk_threshold: 0.85  # allow moderately risky routes — limited alternatives
+
+  # Landslide: road quality matters most (unstable slopes), then distance
+  weight_distance:     0.30
+  weight_risk:         0.40
+  weight_road_quality: 0.25       # elevated — avoid degraded mountain roads
+  weight_time:         0.05
+
+  bpr_alpha: 0.15
+  bpr_beta: 4.0
+  assignment_method: "greedy"
+
+# ------------------------------------------------------------------ #
+# EXECUTION MODE
+# ------------------------------------------------------------------ #
+execution:
+  mode: "naive"
+  n_workers: 4
