@@ -38,7 +38,8 @@ import shutil
 import sys
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+from src.utils.logging_setup import setup_logging as _setup_logging
+_setup_logging("build_legacy_input")
 logger = logging.getLogger("build_legacy_input")
 
 # admin_level sentinel values written by OSMExtractor

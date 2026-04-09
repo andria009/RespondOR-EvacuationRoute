@@ -30,13 +30,31 @@ region:
 # DATA EXTRACTION OPTIONS
 # ------------------------------------------------------------------ #
 extraction:
-  osm_cache_dir: "data/raw/osm_cache/demak"
-  use_cached_osm: false          # set true after first run
+  use_cached_osm: true
+  use_cached_inarisk: true          # set true after first run
   network_type: "all"
 
-  village_admin_levels: [9, 8, 7]
+  village_sources: [building_clusters]
   village_pop_density: 1200.0    # dense coastal-plain settlements
   village_max_pop: 50000
+
+  village_cluster_eps_m: 150
+  village_cluster_min_buildings: 1
+  village_cluster_max_area_km2: 5.0
+  village_fill_uncovered_l9: true
+  village_persons_per_dwelling: 2.0
+  village_building_persons:
+    house:       4.0
+    detached:    7.0
+    residential: 10.0
+    apartments:  25.0
+    farm:        7.0
+    "yes":       2.0
+    mosque:      0.0
+    school:      0.0
+    hospital:    0.0
+    commercial:  0.0
+    office:      0.0
 
   inarisk_batch_size: 20
   inarisk_rate_limit_s: 1.0
@@ -45,13 +63,16 @@ extraction:
 
   # Flood shelters: schools and community halls used heavily in Demak 2024
   shelter_tags:
-    amenity:   [hospital, school, community_centre]
+    amenity:   [hospital, clinic, school, university, community_centre, place_of_worship]
     emergency: [assembly_point, shelter]
-    building:  [school, civic, public]
-
-  shelter_min_area_m2: 400.0     # include smaller community halls
-  shelter_m2_per_person: 2.5     # more space per person during flood
+    building:  [school, university, civic, government, public, church, mosque]
+    leisure:   [sports_centre, stadium, pitch, park]
+    landuse:   [military]
+  shelter_min_area_m2: 250.0     # include smaller community halls
+  shelter_m2_per_person: 3.0     # more space per person during flood
   shelter_capacity_csv: null
+  shelter_cluster_eps_m: 250
+  shelter_cluster_min_shelters: 1
 
   # Flood-affected road speeds: submerged/damaged roads removed at routing stage
   # via InaRISK risk threshold — do not remove road types here.
@@ -73,7 +94,7 @@ extraction:
 # ROUTING CONFIGURATION
 # ------------------------------------------------------------------ #
 routing:
-  max_routes_per_village: 3
+  max_routes_per_village: 5
   max_route_risk_threshold: 0.75  # stricter — flooded roads are impassable
 
   # Flood: prioritise risk avoidance and distance over time
@@ -84,7 +105,7 @@ routing:
 
   bpr_alpha: 0.15
   bpr_beta: 4.0
-  assignment_method: "greedy"
+  assignment_method: "greedy"   # greedy (fast) | lp (optimal)
 
 # ------------------------------------------------------------------ #
 # EXECUTION MODE

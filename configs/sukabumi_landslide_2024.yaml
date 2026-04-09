@@ -32,39 +32,30 @@ region:
 # DATA EXTRACTION OPTIONS
 # ------------------------------------------------------------------ #
 extraction:
-  osm_cache_dir: "data/raw/osm_cache/sukabumi"
-  use_cached_osm: false
+  use_cached_osm: true
+  use_cached_inarisk: true
   network_type: "all"            # include paths — highland villages often only reachable on foot
 
-  village_sources: [admin_boundary, place_nodes, building_clusters]
-  village_admin_levels: [9, 8, 7]
-  village_pop_density: 600.0     # highland West Java fallback for unknown place types
+  # Highland West Java: building clusters on steep slopes give accurate origins;
+  # wilayah DB provides L9 kelurahan reference for uncovered areas.
+  village_sources: [building_clusters]
+  village_pop_density: 600.0     # highland West Java
   village_max_pop: 20000
 
-  # Per-place-tag footprint and density — calibrated for Cisolok–Palabuhanratu
-  # highland belt. Terrain is steep; settlements cluster in narrow valleys and
-  # ridgelines. Palabuhanratu (small coastal town) is ~15 km from center.
-  village_place_tags: [village, hamlet, town, suburb, quarter]
-  village_place_settings:
-    hamlet:  {radius_m:  250, pop_density:  400}  # dusun on hillside — small
-    village: {radius_m:  650, pop_density:  600}  # desa in valley floor
-    town:    {radius_m: 1200, pop_density: 2000}  # Palabuhanratu / Cisolok town
-    suburb:  {radius_m:  800, pop_density: 2500}  # peri-urban around Palabuhanratu
-    quarter: {radius_m:  400, pop_density: 2000}  # kampung within town
-
-  # building_clusters — highland West Java: denser clusters than NTT,
-  # but buildings more scattered on slopes than lowland Java
-  village_cluster_eps_m: 300
-  village_cluster_min_buildings: 8
-  village_persons_per_dwelling: 4.0   # typical West Java household
+  # building_clusters — highland West Java: buildings more scattered on slopes
+  village_cluster_eps_m: 100
+  village_cluster_min_buildings: 1
+  village_cluster_max_area_km2: 5.0
+  village_fill_uncovered_l9: true
+  village_persons_per_dwelling: 2.0
   village_building_persons:
     house:       4.0
-    detached:    4.0
-    semidetached_house: 3.5
-    terrace:     3.5   # row houses more common near Palabuhanratu coast
-    residential: 6.0
-    farm:        5.5   # smallholder farming households in highlands
-    "yes":       4.0   # untagged buildings
+    detached:    7.0
+    semidetached_house: 4.0
+    terrace:     4.0
+    residential: 10.0
+    farm:        7.0
+    "yes":       2.0
 
   inarisk_batch_size: 20
   inarisk_rate_limit_s: 1.0
@@ -73,13 +64,16 @@ extraction:
 
   # Landslide: puskesmas (clinics) and schools used as shelters; government halls
   shelter_tags:
-    amenity:   [hospital, clinic, school]
+    amenity:   [hospital, clinic, school, university, community_centre, place_of_worship]
     emergency: [assembly_point, shelter]
-    building:  [school, civic, government]
-
-  shelter_min_area_m2: 300.0     # include small rural puskesmas
+    building:  [school, university, civic, government, public, church, mosque]
+    leisure:   [sports_centre, stadium, pitch, park]
+    landuse:   [military]
+  shelter_min_area_m2: 250.0     # include small rural puskesmas
   shelter_m2_per_person: 2.0
   shelter_capacity_csv: null
+  shelter_cluster_eps_m: 200
+  shelter_cluster_min_shelters: 1
 
   road_types:
     motorway:      {speed_kmh: 100, capacity_veh_h: 2200}
@@ -99,7 +93,8 @@ extraction:
 # ROUTING CONFIGURATION
 # ------------------------------------------------------------------ #
 routing:
-  max_routes_per_village: 3
+  max_routes_per_village: 5
+  min_routes_per_village: 3
   max_route_risk_threshold: 0.85  # allow moderately risky routes — limited alternatives
 
   # Landslide: road quality matters most (unstable slopes), then distance
@@ -110,11 +105,11 @@ routing:
 
   bpr_alpha: 0.15
   bpr_beta: 4.0
-  assignment_method: "greedy"
+  assignment_method: "greedy"   # greedy (fast) | lp (optimal)
 
 # ------------------------------------------------------------------ #
 # EXECUTION MODE
 # ------------------------------------------------------------------ #
 execution:
-  mode: "naive"
+  mode: "parallel"
   n_workers: 4

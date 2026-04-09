@@ -25,19 +25,37 @@ disaster:
 region:
   type: "circle"
   center: [-6.538, 112.045]
-  radius_km: 30.0                # covers Tuban, Lamongan western fringe, coastal strip
+  radius_km: 20.0                # covers Tuban, Lamongan western fringe, coastal strip
 
 # ------------------------------------------------------------------ #
 # DATA EXTRACTION OPTIONS
 # ------------------------------------------------------------------ #
 extraction:
-  osm_cache_dir: "data/raw/osm_cache/tuban"
-  use_cached_osm: false
+  use_cached_osm: true
+  use_cached_inarisk: true
   network_type: "drive"          # earthquake: drive-only — foot routes impractical at scale
 
-  village_admin_levels: [9, 8, 7]
+  village_sources: [building_clusters]
   village_pop_density: 900.0     # mixed coastal-urban / agricultural East Java
   village_max_pop: 80000         # Tuban kota has larger kelurahan
+
+  village_cluster_eps_m: 150
+  village_cluster_min_buildings: 1
+  village_cluster_max_area_km2: 5.0
+  village_fill_uncovered_l9: true
+  village_persons_per_dwelling: 2.0
+  village_building_persons:
+    house:       4.0
+    detached:    7.0
+    residential: 10.0
+    apartments:  25.0
+    farm:        7.0
+    "yes":       2.0
+    mosque:      0.0
+    school:      0.0
+    hospital:    0.0
+    commercial:  0.0
+    office:      0.0
 
   inarisk_batch_size: 20
   inarisk_rate_limit_s: 1.0
@@ -46,14 +64,16 @@ extraction:
 
   # Earthquake: hospitals critical; schools and stadiums used for displaced
   shelter_tags:
-    amenity:   [hospital, school, university]
+    amenity:   [hospital, clinic, school, university, community_centre, place_of_worship]
     emergency: [assembly_point, shelter]
-    leisure:   [stadium, sports_centre]
-    building:  [school, civic, government, stadium]
-
-  shelter_min_area_m2: 600.0
+    building:  [school, university, civic, government, public, church, mosque]
+    leisure:   [sports_centre, stadium, pitch, park]
+    landuse:   [military]
+  shelter_min_area_m2: 250.0
   shelter_m2_per_person: 2.0
   shelter_capacity_csv: null
+  shelter_cluster_eps_m: 250
+  shelter_cluster_min_shelters: 1
 
   # Earthquake: road blockages captured via InaRISK risk score;
   # keep full speed hierarchy — post-quake debris modelled as risk, not speed.
@@ -73,7 +93,7 @@ extraction:
 # ROUTING CONFIGURATION
 # ------------------------------------------------------------------ #
 routing:
-  max_routes_per_village: 3
+  max_routes_per_village: 5
   max_route_risk_threshold: 0.80
 
   # Earthquake: balanced — many routes may be partially blocked; spread load
@@ -84,7 +104,7 @@ routing:
 
   bpr_alpha: 0.15
   bpr_beta: 4.0
-  assignment_method: "greedy"
+  assignment_method: "greedy"   # greedy (fast) | lp (optimal)
 
 # ------------------------------------------------------------------ #
 # EXECUTION MODE

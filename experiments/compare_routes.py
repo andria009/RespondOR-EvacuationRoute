@@ -25,8 +25,8 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                    datefmt="%H:%M:%S")
+from src.utils.logging_setup import setup_logging as _setup_logging
+_setup_logging("compare_routes")
 logger = logging.getLogger("compare_routes")
 
 # ── Colour palettes (matching export_shp preview design) ─────────────────────
@@ -195,12 +195,33 @@ def run_pipeline(config_path: Path, label: str):
     # ── Stage 2: Risk scoring ─────────────────────────────────────────────────
     logger.info(f"[{label}] Stage 2: Risk scoring …")
     t0 = time.perf_counter()
-    inarisk = InaRISKClient(
-        batch_size=cfg.extraction.inarisk_batch_size,
-        rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
-    )
-    inarisk.enrich_villages_with_risk(villages, disaster.disaster_type)
-    inarisk.enrich_shelters_with_risk(shelters, disaster.disaster_type)
+    if cfg.skip_inarisk:
+        logger.warning(f"[{label}] skip_inarisk=true — all risk scores set to 0.0")
+        for v in villages:
+            v.risk_scores["composite"] = 0.0
+        for s in shelters:
+            s.risk_scores["composite"] = 0.0
+    else:
+        inarisk = InaRISKClient(
+            batch_size=cfg.extraction.inarisk_batch_size,
+            rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
+        )
+        _hazard_layers_raw = cfg.routing.hazard_layers  # {str: float}
+        _hazard_layers = {}
+        if _hazard_layers_raw:
+            for _name, _weight in _hazard_layers_raw.items():
+                try:
+                    _hazard_layers[DisasterType(_name)] = float(_weight)
+                except ValueError:
+                    logger.warning(f"[{label}] Unknown hazard layer '{_name}' — skipping")
+        if len(_hazard_layers) > 1:
+            logger.info(f"[{label}]   Compound hazard: "
+                        f"{', '.join(f'{dt.value}×{w}' for dt, w in _hazard_layers.items())}")
+            inarisk.enrich_villages_compound(villages, _hazard_layers, cfg.routing.hazard_aggregation)
+            inarisk.enrich_shelters_compound(shelters, _hazard_layers, cfg.routing.hazard_aggregation)
+        else:
+            inarisk.enrich_villages_with_risk(villages, disaster.disaster_type)
+            inarisk.enrich_shelters_with_risk(shelters, disaster.disaster_type)
     timings["risk_scoring"] = time.perf_counter() - t0
     logger.info(f"[{label}]   Risk scoring: {timings['risk_scoring']:.1f}s")
 
@@ -299,7 +320,8 @@ def _add_village_layer(m, top_routes, village_geoms, border_color, label_prefix,
     villages = [v for v, _ in top_routes]
     pop_classes = _quintile_class_list([v.population for v in villages])
     for (village, routes), pc in zip(top_routes, pop_classes):
-        risk  = village.risk_scores.get("volcano", 0.0)
+        risk  = village.risk_scores.get("composite",
+                next(iter(village.risk_scores.values()), 0.0))
         color = POP_COLORS[pc - 1]
         tip   = folium.Tooltip(
             f"<b>{village.name}</b><br>"

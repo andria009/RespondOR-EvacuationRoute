@@ -1,33 +1,34 @@
-# RespondOR-EvacuationRoute — Lewotobi Laki-Laki Eruption 2024
-# November 2024: Mount Lewotobi Laki-Laki (Flores, East Nusa Tenggara) erupted
-# explosively, killing 9 people and forcing evacuation of 10,000+ residents
-# across multiple kecamatan. Pyroclastic flows and heavy ashfall blocked roads;
-# the airport at Maumere was temporarily closed.
-# This is a remote island scenario: sparse road network, limited shelter
-# capacity, high-risk zone close to the summit with few viable escape corridors.
+# RespondOR-EvacuationRoute — Mount Sinabung Eruption 2016
+# Sinabung (Karo Regency, North Sumatra) has been in near-continuous eruption
+# since 2010. In May 2016, a major pyroclastic surge killed 7 people and forced
+# the evacuation of 10,000+ residents from villages within 5–7 km of the summit.
+# The 10 km radius captures the primary danger zone and the nearest safe
+# evacuation destinations (Kabanjahe town, Berastagi resort town nearby).
+# This is a remote highland scenario: Karo Plateau at ~1,300 m elevation,
+# predominantly Batak Karo communities, sparse OSM admin boundary coverage
+# — place nodes and building clusters provide fallback village data.
 
-scenario_id: "lewotobi_eruption_2024"
-output_dir: "output/lewotobi_eruption_2024"
+scenario_id: "sinabung_eruption_2016"
+output_dir: "output/sinabung_eruption_2016"
 log_level: "INFO"
 
 # ------------------------------------------------------------------ #
 # DISASTER INFORMATION
 # ------------------------------------------------------------------ #
 disaster:
-  name: "Lewotobi Laki-Laki Eruption 2024"
-  type: "volcano"                # earthquake|volcano|flood|landslide
-  lat: -8.503                    # Lewotobi Laki-Laki summit, eastern Flores
-  lon: 122.775
-  severity: 0.90                 # explosive eruption with pyroclastic flows
+  name: "Mount Sinabung Eruption 2016"
+  type: "volcano"
+  lat: 3.17                       # Sinabung summit, Karo Regency, North Sumatra
+  lon: 98.39
+  severity: 0.90                  # major pyroclastic surge; prolonged eruption crisis
 
 # ------------------------------------------------------------------ #
 # REGION OF INTEREST
 # ------------------------------------------------------------------ #
 region:
   type: "circle"
-  center: [-8.503, 122.775]
-  radius_km: 15.0                # tight radius — Flores has limited road network
-  # Extend to 20 km if shelter coverage is insufficient after first run
+  center: [3.17, 98.39]
+  radius_km: 10.0                 # covers 7 km KRB and nearest shelter towns
 
 # ------------------------------------------------------------------ #
 # DATA EXTRACTION OPTIONS
@@ -35,15 +36,14 @@ region:
 extraction:
   use_cached_osm: true
   use_cached_inarisk: true
-  network_type: "all"            # include tracks — remote Flores villages often reachable only via dirt track
+  network_type: "all"             # include tracks — plantation and farm roads critical
 
-  # NTT: OSM building coverage sparse; building clusters with low min_buildings
-  # threshold capture small kampung. Synthetic fill covers uncovered L9 desa.
+  # North Sumatra: OSM building coverage patchy in rural Karo highlands;
+  # building clusters provide the most reliable population origin data.
   village_sources: [building_clusters]
-  village_pop_density: 400.0     # rural NTT — lower than Java
+  village_pop_density: 500.0      # Karo Highland plateau — lower than Java
   village_max_pop: 15000
 
-  # building_clusters — NTT: smaller, looser clusters; extended family households
   village_cluster_eps_m: 150
   village_cluster_min_buildings: 1
   village_cluster_max_area_km2: 5.0
@@ -52,30 +52,35 @@ extraction:
   village_building_persons:
     house:       4.0
     detached:    7.0
-    farm:        7.0   # multi-generational family compound common in NTT
     residential: 10.0
+    farm:        7.0
     "yes":       2.0
+    church:      0.0               # Karo area predominantly Christian
+    school:      0.0
+    hospital:    0.0
+    commercial:  0.0
+    warehouse:   0.0
 
   inarisk_batch_size: 20
   inarisk_rate_limit_s: 1.0
 
   population_csv: null
 
-  # Volcano on remote island: puskesmas, churches (common assembly points in NTT),
-  # schools. Expand tags broadly — shelter options are limited.
+  # Sinabung: churches and schools are primary assembly points (Karo is majority
+  # Protestant). Kabanjahe Pasar Induk used as major shelter. Include clinic (puskesmas).
   shelter_tags:
     amenity:   [hospital, clinic, school, place_of_worship]
     emergency: [assembly_point, shelter]
     building:  [school, civic, government, church]
     leisure:   [sports_centre, pitch, park]
     landuse:   [military]
-  shelter_min_area_m2: 200.0     # lower threshold — rural NTT has small buildings
+  shelter_min_area_m2: 200.0      # include small puskesmas and rural churches
   shelter_m2_per_person: 2.0
   shelter_capacity_csv: null
   shelter_cluster_eps_m: 250
   shelter_cluster_min_shelters: 1
 
-  # Remote island: slower speeds, include tracks as they are the only access
+  # Plantation/highland roads: slower speeds; track roads important
   road_types:
     trunk:         {speed_kmh:  60, capacity_veh_h: 1600}
     primary:       {speed_kmh:  50, capacity_veh_h: 1400}
@@ -85,7 +90,7 @@ extraction:
     residential:   {speed_kmh:  20, capacity_veh_h:  300}
     service:       {speed_kmh:  15, capacity_veh_h:  150}
     living_street: {speed_kmh:  10, capacity_veh_h:  100}
-    track:         {speed_kmh:  15, capacity_veh_h:   80}   # critical — only access for some villages
+    track:         {speed_kmh:  15, capacity_veh_h:   80}   # plantation roads
     path:          {speed_kmh:   6, capacity_veh_h:   30}
     footway:       {speed_kmh:   4, capacity_veh_h:   20}
 
@@ -93,13 +98,13 @@ extraction:
 # ROUTING CONFIGURATION
 # ------------------------------------------------------------------ #
 routing:
-  max_routes_per_village: 3
-  max_route_risk_threshold: 0.90  # high threshold — very few route alternatives on Flores
+  max_routes_per_village: 5
+  max_route_risk_threshold: 0.90  # few alternatives — accept moderately risky routes
 
-  # Volcano on island: risk dominates (pyroclastic flows); accept longer routes
+  # Volcano: risk strongly dominant; pyroclastic flow corridors on SE/S flanks
   weight_distance:     0.20
-  weight_risk:         0.55       # strongest penalty — pyroclastic flow corridors fatal
-  weight_road_quality: 0.20       # important — many roads are unpaved tracks
+  weight_risk:         0.55
+  weight_road_quality: 0.20       # plantation tracks degrade quickly under ashfall
   weight_time:         0.05
 
   bpr_alpha: 0.15

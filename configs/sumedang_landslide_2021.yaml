@@ -1,0 +1,122 @@
+# RespondOR-EvacuationRoute — Sumedang Landslide 2021
+# January 9, 2021: multiple simultaneous landslides struck Desa Cihanjuang,
+# Kecamatan Cimanggung, Sumedang Regency (West Java), killing 40+ people and
+# destroying 30+ homes. The event was triggered by extreme rainfall following
+# the eruption of nearby Tangkuban Parahu (which altered local soil stability).
+# Cimanggung is a peri-urban area south of Bandung — denser than typical rural
+# West Java, with a mix of residential developments and remaining agricultural
+# land on steep slopes.
+# This scenario is well-suited for all three village sources: admin boundaries
+# are mapped (proximity to Bandung), place nodes fill gaps in newer developments,
+# and building clusters capture informal hillside settlements.
+
+scenario_id: "sumedang_landslide_2021"
+output_dir: "output/sumedang_landslide_2021"
+log_level: "INFO"
+
+# ------------------------------------------------------------------ #
+# DISASTER INFORMATION
+# ------------------------------------------------------------------ #
+disaster:
+  name: "Sumedang Landslide 2021"
+  type: "landslide"
+  lat: -6.93                      # Desa Cihanjuang, Kecamatan Cimanggung
+  lon: 107.78
+  severity: 0.75
+
+# ------------------------------------------------------------------ #
+# REGION OF INTEREST
+# ------------------------------------------------------------------ #
+region:
+  type: "circle"
+  center: [-6.93, 107.78]
+  radius_km: 10.0                 # covers Cimanggung, Jatinangor, and eastern Sumedang fringe
+
+# ------------------------------------------------------------------ #
+# DATA EXTRACTION OPTIONS
+# ------------------------------------------------------------------ #
+extraction:
+  use_cached_osm: true
+  use_cached_inarisk: true
+  network_type: "all"
+
+  # West Java near Bandung: excellent OSM building coverage in peri-urban area;
+  # building clusters give accurate population distribution on steep slopes.
+  village_sources: [building_clusters]
+  village_pop_density: 2500.0     # peri-urban Bandung fringe — high density
+  village_max_pop: 40000
+
+  # Peri-urban Bandung: dense OSM building coverage expected
+  village_cluster_eps_m: 150
+  village_cluster_min_buildings: 1
+  village_cluster_max_area_km2: 5.0
+  village_fill_uncovered_l9: true
+  village_persons_per_dwelling: 2.0
+  village_building_persons:
+    house:       4.0
+    detached:    7.0
+    semidetached_house: 4.0
+    terrace:     4.0
+    residential: 10.0
+    apartments:  25.0
+    "yes":       2.0
+    mosque:      0.0
+    school:      0.0
+    hospital:    0.0
+    commercial:  0.0
+    retail:      0.0
+
+  inarisk_batch_size: 20
+  inarisk_rate_limit_s: 1.0
+
+  population_csv: null
+
+  # Sumedang: Jatinangor (IPDN, ITB campus) and Sumedang hospital used in 2021
+  # response. Schools and mosques on stable ground served as assembly points.
+  shelter_tags:
+    amenity:   [hospital, clinic, school, university, community_centre, place_of_worship]
+    emergency: [assembly_point, shelter]
+    building:  [school, university, civic, government, public, church, mosque]
+    leisure:   [sports_centre, stadium, pitch, park]
+    landuse:   [military]
+  shelter_min_area_m2: 250.0
+  shelter_m2_per_person: 2.0
+  shelter_capacity_csv: null
+  shelter_cluster_eps_m: 250
+  shelter_cluster_min_shelters: 1
+
+  road_types:
+    primary:       {speed_kmh:  50, capacity_veh_h: 1600}
+    secondary:     {speed_kmh:  40, capacity_veh_h: 1200}
+    tertiary:      {speed_kmh:  30, capacity_veh_h:  800}
+    unclassified:  {speed_kmh:  25, capacity_veh_h:  500}
+    residential:   {speed_kmh:  20, capacity_veh_h:  500}
+    service:       {speed_kmh:  15, capacity_veh_h:  250}
+    living_street: {speed_kmh:  10, capacity_veh_h:  150}
+    track:         {speed_kmh:  10, capacity_veh_h:   60}
+    path:          {speed_kmh:   5, capacity_veh_h:   25}
+    footway:       {speed_kmh:   4, capacity_veh_h:   20}
+
+# ------------------------------------------------------------------ #
+# ROUTING CONFIGURATION
+# ------------------------------------------------------------------ #
+routing:
+  max_routes_per_village: 5
+  max_route_risk_threshold: 0.80  # stricter — landslide areas are densely settled
+
+  # Landslide in peri-urban area: road quality and risk balanced with distance
+  weight_distance:     0.25
+  weight_risk:         0.40
+  weight_road_quality: 0.30       # elevated — slope instability blocks narrow roads
+  weight_time:         0.05
+
+  bpr_alpha: 0.15
+  bpr_beta: 4.0
+  assignment_method: "greedy"   # greedy (fast) | lp (optimal)
+
+# ------------------------------------------------------------------ #
+# EXECUTION MODE
+# ------------------------------------------------------------------ #
+execution:
+  mode: "naive"
+  n_workers: 4

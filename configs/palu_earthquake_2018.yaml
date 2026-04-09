@@ -1,0 +1,130 @@
+# RespondOR-EvacuationRoute — Palu Earthquake 2018
+# September 28, 2018: M7.5 earthquake struck Donggala Regency, triggering a
+# destructive tsunami in Palu Bay and widespread liquefaction in low-lying
+# neighbourhoods (Petobo, Balaroa, Jono Oge). More than 4,300 people were
+# killed and 170,000 displaced across Palu city, Donggala, and Sigi regencies.
+# This is a compound hazard scenario: seismic shaking, coastal tsunami inundation,
+# and inland liquefaction simultaneously damaged roads and destroyed settlements.
+# The 50 km radius captures the full affected belt from Donggala coast to Sigi highlands.
+
+scenario_id: "palu_earthquake_2018"
+output_dir: "output/palu_earthquake_2018"
+log_level: "INFO"
+skip_inarisk: true              # earthquake layer down — set false when INDEKS_BAHAYA_GEMPABUMI recovers
+
+# ------------------------------------------------------------------ #
+# DISASTER INFORMATION
+# ------------------------------------------------------------------ #
+disaster:
+  name: "Palu Earthquake 2018"
+  type: "earthquake"              # earthquake|volcano|flood|landslide
+  lat: -0.178                     # epicentre — Donggala offshore
+  lon: 119.840
+  severity: 0.95                  # M7.5 with tsunami and liquefaction
+
+# ------------------------------------------------------------------ #
+# REGION OF INTEREST
+# ------------------------------------------------------------------ #
+region:
+  type: "circle"
+  center: [-0.178, 119.840]
+  radius_km: 50.0                 # covers Palu city, Donggala, and Sigi regencies
+
+# ------------------------------------------------------------------ #
+# DATA EXTRACTION OPTIONS
+# ------------------------------------------------------------------ #
+extraction:
+  use_cached_osm: true
+  use_cached_inarisk: true
+  network_type: "all"
+
+  # Sulawesi: building clusters for Palu city and rural Donggala/Sigi;
+  # wilayah DB provides L9 spatial reference where boundaries are mapped.
+  village_sources: [building_clusters]
+  village_pop_density: 800.0      # mix of dense Palu city and sparse rural Sigi/Donggala
+  village_max_pop: 40000
+
+  # building_clusters — Palu city has reasonable OSM building coverage
+  village_cluster_eps_m: 150
+  village_cluster_min_buildings: 1
+  village_cluster_max_area_km2: 5.0
+  village_fill_uncovered_l9: true
+  village_persons_per_dwelling: 2.0
+  village_building_persons:
+    house:       4.0
+    detached:    7.0
+    residential: 10.0
+    apartments:  25.0
+    farm:        7.0
+    "yes":       2.0
+    commercial:  0.0
+    mosque:      0.0   # Palu is majority Muslim — mosques used as shelters, not residences
+    school:      0.0
+    hospital:    0.0
+    office:      0.0
+
+  inarisk_batch_size: 20
+  inarisk_rate_limit_s: 1.0
+
+  population_csv: null
+
+  # Earthquake + tsunami: hospitals, schools, mosques (Bukit Jabal Nur hill shelters),
+  # stadiums (Gawalise Stadium used in 2018 response), government buildings
+  shelter_tags:
+    amenity:   [hospital, clinic, school, university, community_centre, place_of_worship]
+    emergency: [assembly_point, shelter]
+    building:  [school, university, civic, government, public, church, mosque]
+    leisure:   [sports_centre, stadium, pitch, park]
+    landuse:   [military]
+  shelter_min_area_m2: 200.0      # lowered — OSM building coverage sparse in Sulawesi
+  shelter_m2_per_person: 2.0
+  shelter_capacity_csv: null
+  shelter_cluster_eps_m: 250
+  shelter_cluster_min_shelters: 1
+
+  # Post-earthquake: road speeds reduced; coastal roads assume partial tsunami damage
+  road_types:
+    trunk:         {speed_kmh:  60, capacity_veh_h: 1600}
+    primary:       {speed_kmh:  50, capacity_veh_h: 1400}
+    secondary:     {speed_kmh:  40, capacity_veh_h: 1000}
+    tertiary:      {speed_kmh:  30, capacity_veh_h:  700}
+    unclassified:  {speed_kmh:  25, capacity_veh_h:  500}
+    residential:   {speed_kmh:  20, capacity_veh_h:  400}
+    service:       {speed_kmh:  15, capacity_veh_h:  200}
+    living_street: {speed_kmh:  10, capacity_veh_h:  100}
+    track:         {speed_kmh:  15, capacity_veh_h:   80}
+    path:          {speed_kmh:   6, capacity_veh_h:   30}
+    footway:       {speed_kmh:   4, capacity_veh_h:   20}
+
+# ------------------------------------------------------------------ #
+# ROUTING CONFIGURATION
+# ------------------------------------------------------------------ #
+routing:
+  max_routes_per_village: 5
+  max_route_risk_threshold: 0.85  # allow moderately risky routes — limited alternatives
+
+  # Earthquake: risk and distance both critical; tsunami zone coastal routes avoided
+  weight_distance:     0.30
+  weight_risk:         0.45       # seismic + liquefaction + tsunami hazard zones
+  weight_road_quality: 0.20       # road damage from shaking degrades surface quality
+  weight_time:         0.05
+
+  # Compound hazard layers: Palu 2018 combined earthquake shaking,
+  # coastal tsunami inundation, and inland liquefaction.
+  # Each layer is queried from InaRISK independently and combined via weighted_sum.
+  hazard_layers:
+    earthquake:   0.50              # primary seismic hazard
+    tsunami:      0.30              # tsunami inundation along Palu Bay coast
+    liquefaction: 0.20              # liquefaction in Petobo, Balaroa, Jono Oge
+  hazard_aggregation: "weighted_sum"
+
+  bpr_alpha: 0.15
+  bpr_beta: 4.0
+  assignment_method: "greedy"   # greedy (fast) | lp (optimal)
+
+# ------------------------------------------------------------------ #
+# EXECUTION MODE
+# ------------------------------------------------------------------ #
+execution:
+  mode: "naive"
+  n_workers: 4

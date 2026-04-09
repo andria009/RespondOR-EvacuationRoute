@@ -33,6 +33,7 @@ class EvacuationGraphBuilder:
     def __init__(self):
         self.G: Optional[nx.Graph] = None
         self._node_coords: Dict[int, Tuple[float, float]] = {}  # node_id -> (lat, lon)
+        self._risk_weight: float = 0.4  # stored during build() for reuse in edge enrichment
 
     def build(
         self,
@@ -40,7 +41,7 @@ class EvacuationGraphBuilder:
         edges: List[NetworkEdge],
         disaster_type: Optional[DisasterType] = None,
         risk_weight: float = 0.4,
-        prune_impassable: bool = True,
+        prune_impassable: bool = False,
         impassable_risk_threshold: float = 0.9,
     ) -> nx.Graph:
         """
@@ -51,11 +52,15 @@ class EvacuationGraphBuilder:
             edges: Road network edges.
             disaster_type: Primary disaster type (used to select risk score field).
             risk_weight: How much risk contributes to composite edge weight.
-            prune_impassable: Remove edges with risk > threshold.
-            impassable_risk_threshold: Risk value above which edges are removed.
+            prune_impassable: Remove edges with risk > threshold.  Default False —
+                              pruning disconnects the graph and leaves villages unreachable.
+                              Risk is penalised through composite weight instead.
+            impassable_risk_threshold: Risk value above which edges are removed (only
+                                       used when prune_impassable=True).
         Returns:
             Weighted NetworkX Graph.
         """
+        self._risk_weight = risk_weight
         G = nx.Graph()
 
         # Add nodes
@@ -152,6 +157,89 @@ class EvacuationGraphBuilder:
             logger.warning(f"{no_node_v} villages have no nearest node")
         if no_node_s:
             logger.warning(f"{no_node_s} shelters have no nearest node")
+
+    def apply_inarisk_to_edges(
+        self,
+        inarisk,                        # InaRISKClient — avoid circular import
+        hazard_layers: dict,            # {DisasterType: weight}
+        aggregation: str = "weighted_sum",
+        cache_path=None,
+        use_cache: bool = True,
+    ) -> int:
+        """
+        Query InaRISK at road segment midpoints and update edge risk_score + weight.
+
+        Delegates to InaRISKClient.enrich_graph_edges(), passing this builder's
+        graph and node coordinate map.  Must be called after build().
+
+        Args:
+            inarisk:       Configured InaRISKClient instance.
+            hazard_layers: {DisasterType: weight} from _resolve_hazard_layers().
+            aggregation:   "weighted_sum" or "max".
+            cache_path:    Path to JSON cache file (shared with export_shp if desired).
+        Returns:
+            Number of edges updated (risk raised above 0.0).
+        """
+        if self.G is None:
+            return 0
+        return inarisk.enrich_graph_edges(
+            G=self.G,
+            node_coords=self._node_coords,
+            hazard_layers=hazard_layers,
+            aggregation=aggregation,
+            risk_weight=self._risk_weight,
+            cache_path=cache_path,
+            use_cache=use_cache,
+        )
+
+    def propagate_poi_risk_to_graph(
+        self,
+        villages: List[Village],
+        shelters: List[Shelter],
+        risk_weight: float = 0.4,
+    ) -> None:
+        """
+        Propagate InaRISK composite risk scores from villages and shelters
+        onto their adjacent graph edges, then recompute composite edge weights.
+
+        Must be called AFTER attach_pois_to_graph() and InaRISK enrichment.
+        Without this step, all edge risk_scores remain 0.0 because OSM road
+        data carries no hazard information — routing would be risk-blind.
+
+        Args:
+            villages: Village objects with risk_scores["composite"] populated.
+            shelters: Shelter objects with risk_scores["composite"] populated.
+            risk_weight: Same risk_weight used in build() — scales risk in
+                         composite_weight = length × quality × (1 + rw × risk).
+        """
+        if self.G is None:
+            return
+
+        updated = 0
+        for poi in (*villages, *shelters):
+            node = getattr(poi, "nearest_node_id", None)
+            if node is None or node not in self.G:
+                continue
+            poi_risk = poi.risk_scores.get("composite", 0.0)
+            if poi_risk <= 0.0:
+                continue
+            for nbr in self.G.neighbors(node):
+                data = self.G[node][nbr]
+                old = data.get("risk_score", 0.0)
+                new_risk = max(old, poi_risk)
+                if new_risk > old:
+                    data["risk_score"] = new_risk
+                    data["weight"] = (
+                        data["length_m"]
+                        * data["quality_weight"]
+                        * (1.0 + risk_weight * new_risk)
+                    )
+                    updated += 1
+
+        logger.info(
+            f"propagate_poi_risk_to_graph: updated risk on {updated} edges "
+            f"from {len(villages)} villages + {len(shelters)} shelters"
+        )
 
     def score_edges_with_risk(
         self,

@@ -33,7 +33,8 @@ import shutil
 import sys
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+from src.utils.logging_setup import setup_logging as _setup_logging
+_setup_logging("prepare_gama_inputs")
 logger = logging.getLogger("prepare_gama_inputs")
 
 

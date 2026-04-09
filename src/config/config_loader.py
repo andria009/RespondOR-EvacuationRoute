@@ -41,6 +41,8 @@ class RegionConfig:
 class ExtractionConfig:
     osm_cache_dir: str = "data/raw/osm_cache"
     use_cached_osm: bool = True
+    inarisk_cache_dir: str = "data/raw/inarisk_cache"
+    use_cached_inarisk: bool = True
     network_type: str = "drive"     # drive|walk|all
     include_path_types: list = field(default_factory=lambda: [
         "motorway", "trunk", "primary", "secondary", "tertiary",
@@ -113,6 +115,7 @@ class ExtractionConfig:
     # building_clusters source: DBSCAN clustering parameters
     village_cluster_eps_m: float = 300.0       # cluster radius (metres)
     village_cluster_min_buildings: int = 10    # min buildings to form a cluster
+    village_cluster_max_area_km2: float = 25.0 # skip clusters larger than this (degenerate chaining)
     # Default occupancy when building type is not in village_building_persons
     village_persons_per_dwelling: float = 4.0
     # Per-OSM-building-type occupancy (persons). Types absent from this dict use
@@ -155,6 +158,13 @@ class ExtractionConfig:
         "greenhouse":         0.0,
     })
 
+    # When True: L9 kelurahan with no building cluster inside them receive a
+    # single synthetic circular cluster at the kelurahan centroid.
+    # Radius = equivalent radius of the smallest real cluster (floor 75 m).
+    # Population = int(house persons from village_building_persons).
+    # Requires wilayah DB to be running.  Default: False.
+    village_fill_uncovered_l9: bool = False
+
     # Population density (persons/km²) for area-based estimation
     village_pop_density: float = 800.0
     # Upper cap on estimated population per village (prevents inflated estimates
@@ -166,27 +176,45 @@ class ExtractionConfig:
     shelter_capacity_csv: Optional[str] = None # path to capacity CSV
     # Area per person estimate for capacity estimation from polygon area
     m2_per_person: float = 2.0
+    # Shelter clustering: group nearby shelters into a single destination
+    shelter_cluster_eps_m: float = 250.0
+    shelter_cluster_min_shelters: int = 1
 
 
 @dataclass
 class RoutingConfig:
-    max_routes_per_village: int = 3
+    max_routes_per_village: int = 5
+    min_routes_per_village: int = 3    # guaranteed minimum (1 primary + N-1 alternatives)
     max_route_risk_threshold: float = 0.8
-    # Composite score weights
+    # Composite score weights (lower composite = better route)
     weight_distance: float = 0.3
     weight_risk: float = 0.4
     weight_road_quality: float = 0.2
     weight_time: float = 0.1
+    # Penalty for shelters close to the disaster center (routes moving away = preferred)
+    weight_disaster_distance: float = 0.05
     # Congestion
     bpr_alpha: float = 0.15
     bpr_beta: float = 4.0
-    # Population estimation area fallback
-    area_m2_per_person: float = 100.0
+    # Population assignment method: "greedy" | "lp"
+    #   greedy — fast heuristic, always completes
+    #   lp     — optimal via scipy linprog (HiGHS), falls back to greedy on failure
+    assignment_method: str = "greedy"
+    # Compound hazard layers — maps hazard type string to weight.
+    # When set, all listed InaRISK layers are queried and combined into a
+    # single composite risk score used for routing, village, and shelter scoring.
+    # Weights do not need to sum to 1.0 — they are normalised internally.
+    # Supported types: earthquake, volcano, flood, landslide,
+    #                  tsunami, liquefaction, flash_flood
+    # If empty/null, the primary disaster.type is used as the sole layer (default).
+    hazard_layers: dict = field(default_factory=dict)
+    # How to combine per-layer scores: "weighted_sum" | "max"
+    hazard_aggregation: str = "weighted_sum"
 
 
 @dataclass
 class ExecutionConfig:
-    mode: str = "naive"             # naive|parallel|hpc
+    mode: str = "parallel"          # naive|parallel|hpc
     n_workers: int = 4
     # HPC/MPI settings
     mpi_hosts_file: Optional[str] = None   # optional hostfile for mpirun outside SLURM
@@ -212,6 +240,9 @@ class AppConfig:
     preloaded_poi_csv: Optional[str] = None
     # Limit villages processed (for benchmarking; 0 = no limit)
     benchmark_village_limit: int = 0
+    # Skip InaRISK API calls entirely — all risk scores set to 0.0.
+    # Useful when the gis.bnpb.go.id server is down or for offline testing.
+    skip_inarisk: bool = False
 
 
 def load_config(config_path: Union[str, Path]) -> AppConfig:
@@ -283,6 +314,8 @@ def _parse_config(raw: Dict[str, Any]) -> AppConfig:
     extraction = ExtractionConfig(
         osm_cache_dir=extraction_raw.get("osm_cache_dir", "data/raw/osm_cache"),
         use_cached_osm=extraction_raw.get("use_cached_osm", True),
+        inarisk_cache_dir=extraction_raw.get("inarisk_cache_dir", "data/raw/inarisk_cache"),
+        use_cached_inarisk=extraction_raw.get("use_cached_inarisk", True),
         network_type=extraction_raw.get("network_type", "all"),
         road_types=_road_types,
         village_sources=village_sources,
@@ -295,6 +328,8 @@ def _parse_config(raw: Dict[str, Any]) -> AppConfig:
         village_place_radius_m=extraction_raw.get("village_place_radius_m"),
         village_cluster_eps_m=float(extraction_raw.get("village_cluster_eps_m", 300.0)),
         village_cluster_min_buildings=int(extraction_raw.get("village_cluster_min_buildings", 10)),
+        village_cluster_max_area_km2=float(extraction_raw.get("village_cluster_max_area_km2", 25.0)),
+        village_fill_uncovered_l9=bool(extraction_raw.get("village_fill_uncovered_l9", False)),
         village_persons_per_dwelling=float(extraction_raw.get("village_persons_per_dwelling", 4.0)),
         village_building_persons={
             **ExtractionConfig.__dataclass_fields__["village_building_persons"].default_factory(),
@@ -315,21 +350,31 @@ def _parse_config(raw: Dict[str, Any]) -> AppConfig:
         population_csv=extraction_raw.get("population_csv"),
         shelter_capacity_csv=extraction_raw.get("shelter_capacity_csv"),
         m2_per_person=float(extraction_raw.get("m2_per_person", 2.0)),
+        shelter_cluster_eps_m=float(extraction_raw.get("shelter_cluster_eps_m", 250.0)),
+        shelter_cluster_min_shelters=int(extraction_raw.get("shelter_cluster_min_shelters", 1)),
     )
 
     routing_raw = raw.get("routing", {})
+    # hazard_layers: {hazard_type_string: weight} — normalised internally
+    _hazard_layers_raw = routing_raw.get("hazard_layers") or {}
+    _hazard_layers = {str(k): float(v) for k, v in _hazard_layers_raw.items()}
     routing = RoutingConfig(
-        max_routes_per_village=int(routing_raw.get("max_routes_per_village", 3)),
+        max_routes_per_village=int(routing_raw.get("max_routes_per_village", 5)),
+        min_routes_per_village=int(routing_raw.get("min_routes_per_village", 3)),
         max_route_risk_threshold=float(routing_raw.get("max_route_risk_threshold", 0.8)),
         weight_distance=float(routing_raw.get("weight_distance", 0.3)),
         weight_risk=float(routing_raw.get("weight_risk", 0.4)),
         weight_road_quality=float(routing_raw.get("weight_road_quality", 0.2)),
         weight_time=float(routing_raw.get("weight_time", 0.1)),
+        weight_disaster_distance=float(routing_raw.get("weight_disaster_distance", 0.05)),
+        hazard_layers=_hazard_layers,
+        hazard_aggregation=str(routing_raw.get("hazard_aggregation", "weighted_sum")),
+        assignment_method=str(routing_raw.get("assignment_method", "greedy")),
     )
 
     exec_raw = raw.get("execution", {})
     execution = ExecutionConfig(
-        mode=exec_raw.get("mode", "naive"),
+        mode=exec_raw.get("mode", "parallel"),
         n_workers=int(exec_raw.get("n_workers", 4)),
         mpi_hosts_file=exec_raw.get("mpi_hosts_file"),
     )
@@ -349,4 +394,5 @@ def _parse_config(raw: Dict[str, Any]) -> AppConfig:
         preloaded_shelters_geojson=raw.get("preloaded_shelters_geojson"),
         preloaded_poi_csv=raw.get("preloaded_poi_csv"),
         benchmark_village_limit=int(raw.get("benchmark_village_limit", 0)),
+        skip_inarisk=bool(raw.get("skip_inarisk", False)),
     )

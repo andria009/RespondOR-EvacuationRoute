@@ -10,10 +10,14 @@ from enum import Enum
 
 
 class DisasterType(str, Enum):
-    EARTHQUAKE = "earthquake"
-    VOLCANO = "volcano"
-    FLOOD = "flood"
-    LANDSLIDE = "landslide"
+    EARTHQUAKE  = "earthquake"
+    VOLCANO     = "volcano"
+    FLOOD       = "flood"
+    LANDSLIDE   = "landslide"
+    # Secondary / compound hazard types — queryable as independent InaRISK layers
+    TSUNAMI     = "tsunami"
+    LIQUEFACTION = "liquefaction"
+    FLASH_FLOOD = "flash_flood"
 
 
 class ExecutionMode(str, Enum):

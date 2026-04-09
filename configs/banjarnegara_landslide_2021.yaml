@@ -1,0 +1,120 @@
+# RespondOR-EvacuationRoute — Banjarnegara Landslide 2021
+# February 19, 2021: a massive landslide struck Dusun Sumbersari, Desa Clapar,
+# Kecamatan Madukara, Banjarnegara Regency (Central Java), killing at least
+# 10 people and burying dozens of homes. The area sits in the Serayu River
+# highland zone — steep slopes, high clay-content soils, and saturated ground
+# following prolonged rainfall created ideal landslide conditions.
+# This is a compact highland scenario: small, tightly clustered desa within
+# a narrow valley system. Road quality is critical — most access routes are
+# narrow tertiary/unclassified roads on steep inclines susceptible to blockage.
+
+scenario_id: "banjarnegara_landslide_2021"
+output_dir: "output/banjarnegara_landslide_2021"
+log_level: "INFO"
+
+# ------------------------------------------------------------------ #
+# DISASTER INFORMATION
+# ------------------------------------------------------------------ #
+disaster:
+  name: "Banjarnegara Landslide 2021"
+  type: "landslide"
+  lat: -7.37                      # Kecamatan Madukara, Banjarnegara Regency
+  lon: 109.68
+  severity: 0.80
+
+# ------------------------------------------------------------------ #
+# REGION OF INTEREST
+# ------------------------------------------------------------------ #
+region:
+  type: "circle"
+  center: [-7.37, 109.68]
+  radius_km: 10.0                 # compact scenario — nearest shelters in Banjarnegara town
+
+# ------------------------------------------------------------------ #
+# DATA EXTRACTION OPTIONS
+# ------------------------------------------------------------------ #
+extraction:
+  use_cached_osm: true
+  use_cached_inarisk: true
+  network_type: "all"
+
+  # Central Java: building clusters provide most reliable population data
+  # for compact highland desa; wilayah DB used as spatial reference.
+  village_sources: [building_clusters]
+  village_pop_density: 800.0      # Banjarnegara highland — lower than lowland Java
+  village_max_pop: 20000
+
+  village_cluster_eps_m: 100
+  village_cluster_min_buildings: 1
+  village_cluster_max_area_km2: 5.0
+  village_fill_uncovered_l9: true
+  village_persons_per_dwelling: 2.0
+  village_building_persons:
+    house:       4.0
+    detached:    7.0
+    residential: 10.0
+    farm:        7.0
+    "yes":       2.0
+    mosque:      0.0
+    school:      0.0
+    hospital:    0.0
+    commercial:  0.0
+
+  inarisk_batch_size: 20
+  inarisk_rate_limit_s: 1.0
+
+  population_csv: null
+
+  # Landslide: Balai Desa, schools, and clinics (puskesmas) used as evacuation
+  # points. Banjarnegara town has the nearest hospital and sports facilities.
+  shelter_tags:
+    amenity:   [hospital, clinic, school, university, community_centre, place_of_worship]
+    emergency: [assembly_point, shelter]
+    building:  [school, university, civic, government, public, church, mosque]
+    leisure:   [sports_centre, stadium, pitch, park]
+    landuse:   [military]
+  shelter_min_area_m2: 250.0      # include small balai desa and puskesmas
+  shelter_m2_per_person: 2.0
+  shelter_capacity_csv: null
+  shelter_cluster_eps_m: 200
+  shelter_cluster_min_shelters: 1
+
+  # Highland Banjarnegara: narrow roads; tracks important for remote dusun
+  road_types:
+    primary:       {speed_kmh:  50, capacity_veh_h: 1400}
+    secondary:     {speed_kmh:  40, capacity_veh_h: 1000}
+    tertiary:      {speed_kmh:  30, capacity_veh_h:  700}
+    unclassified:  {speed_kmh:  20, capacity_veh_h:  400}
+    residential:   {speed_kmh:  20, capacity_veh_h:  400}
+    service:       {speed_kmh:  15, capacity_veh_h:  200}
+    living_street: {speed_kmh:  10, capacity_veh_h:  100}
+    track:         {speed_kmh:  10, capacity_veh_h:   60}   # critical highland access
+    path:          {speed_kmh:   5, capacity_veh_h:   25}
+    footway:       {speed_kmh:   4, capacity_veh_h:   20}
+
+# ------------------------------------------------------------------ #
+# ROUTING CONFIGURATION
+# ------------------------------------------------------------------ #
+routing:
+  max_routes_per_village: 5
+  min_routes_per_village: 3
+  max_route_risk_threshold: 0.85
+
+  # Landslide: road quality and risk are co-dominant; narrow highland roads
+  # degrade rapidly under saturated conditions
+  weight_distance:         0.25
+  weight_risk:             0.30
+  weight_road_quality:     0.20       # highest weight — road blockage is primary threat
+  weight_time:             0.10
+  weight_disaster_distance: 0.15     # slight preference for shelters away from landslide zone
+
+  bpr_alpha: 0.15
+  bpr_beta: 4.0
+  assignment_method: "greedy"   # greedy (fast) | lp (optimal)
+
+# ------------------------------------------------------------------ #
+# EXECUTION MODE
+# ------------------------------------------------------------------ #
+execution:
+  mode: "parallel"
+  n_workers: 4

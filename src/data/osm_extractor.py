@@ -96,6 +96,9 @@ class OSMExtractor:
         logger.info(f"Extracting road network for bbox {bbox}")
         south, west, north, east = bbox
 
+        _prev_oxcache = ox.settings.use_cache
+        if not use_cache:
+            ox.settings.use_cache = False
         try:
             G = ox.graph_from_bbox(
                 bbox=(west, south, east, north),
@@ -106,6 +109,8 @@ class OSMExtractor:
         except Exception as e:
             logger.error(f"OSM network extraction failed: {e}")
             raise
+        finally:
+            ox.settings.use_cache = _prev_oxcache
 
         nodes, edges = self._oxgraph_to_models(G, road_types=road_types)
 
@@ -118,6 +123,33 @@ class OSMExtractor:
             + ")"
         )
         return nodes, edges
+
+    def extract_road_network_gdf(
+        self,
+        region: RegionOfInterest,
+        network_type: str = "all",
+        use_cache: bool = True,
+    ) -> Tuple["gpd.GeoDataFrame", "gpd.GeoDataFrame"]:
+        """
+        Return raw (nodes_gdf, edges_gdf) from osmnx without model conversion.
+        Useful for shapefile export or other consumers that need line geometries.
+        Uses osmnx's built-in HTTP cache under self.cache_dir/http.
+        """
+        if not HAS_OSMNX:
+            raise RuntimeError("osmnx required for live OSM extraction")
+
+        ox.settings.use_cache = use_cache
+        ox.settings.cache_folder = str(self.cache_dir / "http")
+
+        south, west, north, east = region.to_bbox()
+        logger.info(f"Extracting road network GDF for bbox ({south:.4f},{west:.4f},{north:.4f},{east:.4f})")
+        G = ox.graph_from_bbox(
+            bbox=(west, south, east, north),
+            network_type=network_type,
+            retain_all=True,
+            simplify=True,
+        )
+        return ox.graph_to_gdfs(G)
 
     def extract_villages(
         self,
@@ -132,8 +164,10 @@ class OSMExtractor:
         place_radius_m: Optional[float] = None,
         cluster_eps_m: float = 300.0,
         cluster_min_buildings: int = 10,
+        cluster_max_area_km2: float = 25.0,
         persons_per_dwelling: float = 4.0,
         building_persons: Optional[dict] = None,
+        fill_uncovered_l9: bool = False,
     ) -> List[Village]:
         """
         Extract village population areas from one or more OSM sources.
@@ -142,6 +176,11 @@ class OSMExtractor:
         centroid is not already covered by a polygon from a previous source.
 
         Available sources (set via ``sources`` parameter):
+          ``wilayah_db``
+              Official Indonesian administrative boundaries from the local
+              PostGIS wilayah database (cahayadsn-wilayah* data).
+              Requires Docker Compose to be running (see docker-compose.yml).
+              Provides the most accurate official boundaries and names.
           ``admin_boundary``
               OSM boundary=administrative polygons. admin_levels controls
               which levels are tried (9=desa, 8=kecamatan, 7=kabupaten).
@@ -167,7 +206,8 @@ class OSMExtractor:
 
         bbox = region.to_bbox()
         src_key = "_".join(sources)
-        variant = f"src{src_key}_al{'_'.join(str(l) for l in admin_levels)}_d{int(population_density_per_km2)}"
+        fill_suffix = "_fill" if fill_uncovered_l9 else ""
+        variant = f"src{src_key}_al{'_'.join(str(l) for l in admin_levels)}_d{int(population_density_per_km2)}_eps{int(cluster_eps_m)}{fill_suffix}"
         cache_key = self._cache_key("villages", bbox, variant)
         cache_path = self.cache_dir / f"{cache_key}.geojson"
 
@@ -181,10 +221,38 @@ class OSMExtractor:
         south, west, north, east = bbox
         ox_bbox = (west, south, east, north)  # osmnx 2.x: (left, bottom, right, top)
 
+        # ── Incremental / resume support ──────────────────────────────────
+        # Partial cache stores raw villages per completed source.
+        # If killed mid-way, we resume from where we left off.
+        partial_path = cache_path.with_suffix(".partial.json")
+        completed_sources: set = set()
         all_villages: List[Village] = []
 
+        if use_cache and partial_path.exists():
+            try:
+                with open(partial_path) as f:
+                    partial = json.load(f)
+                completed_sources = set(partial.get("completed_sources", []))
+                all_villages = self._load_villages_from_records(partial.get("villages", []))
+                logger.info(
+                    f"Resuming village extraction: {completed_sources} already done, "
+                    f"{len(all_villages)} villages loaded from partial cache"
+                )
+            except Exception as e:
+                logger.warning(f"Could not load partial village cache ({e}) — starting fresh")
+                completed_sources = set()
+                all_villages = []
+
         for source in sources:
-            if source == "admin_boundary":
+            if source in completed_sources:
+                logger.info(f"village source '{source}': (cached — skipping)")
+                continue
+
+            if source == "wilayah_db":
+                new = self._villages_from_wilayah_db(
+                    bbox, admin_levels, population_density_per_km2, max_population_per_village
+                )
+            elif source == "admin_boundary":
                 new = self._villages_from_admin_boundary(
                     ox_bbox, admin_levels, population_density_per_km2, max_population_per_village
                 )
@@ -198,26 +266,46 @@ class OSMExtractor:
                 new = self._villages_from_building_clusters(
                     ox_bbox, cluster_eps_m, cluster_min_buildings,
                     persons_per_dwelling, building_persons or {},
-                    max_population_per_village
+                    max_population_per_village,
+                    cluster_max_area_km2,
+                    use_cache=use_cache,
                 )
             else:
                 logger.warning(f"Unknown village source '{source}' — skipping")
+                completed_sources.add(source)
                 continue
 
             if not new:
                 logger.info(f"village source '{source}': no results")
-                continue
+            else:
+                added = self._add_uncovered_villages(new, all_villages)
+                logger.info(f"village source '{source}': {len(new)} found, {len(added)} added (not already covered)")
+                all_villages.extend(added)
 
-            added = self._add_uncovered_villages(new, all_villages)
-            logger.info(f"village source '{source}': {len(new)} found, {len(added)} added (not already covered)")
-            all_villages.extend(added)
+            completed_sources.add(source)
+            self._save_village_partial(partial_path, completed_sources, all_villages)
 
         if not all_villages:
             logger.warning(f"No villages found from any source ({sources}). Returning empty list.")
+            if partial_path.exists():
+                partial_path.unlink()
             return []
 
         all_villages = self._deduplicate_villages(all_villages)
+
+        if fill_uncovered_l9:
+            artificial = self._fill_uncovered_l9(
+                bbox=bbox,
+                existing_villages=all_villages,
+                house_persons=float((building_persons or {}).get("house", persons_per_dwelling)),
+            )
+            if artificial:
+                all_villages.extend(artificial)
+
         self._save_villages_cache(cache_path, all_villages)
+        # Remove partial cache — full cache is now written
+        if partial_path.exists():
+            partial_path.unlink()
         logger.info(
             f"Extracted {len(all_villages)} villages total "
             f"(sources={sources}, density={population_density_per_km2} p/km², "
@@ -229,6 +317,147 @@ class OSMExtractor:
     # Village source implementations
     # ------------------------------------------------------------------
 
+    def _villages_from_wilayah_db(
+        self,
+        bbox: tuple,
+        admin_levels: List[int],
+        population_density_per_km2: float,
+        max_population_per_village: int,
+    ) -> List[Village]:
+        """
+        Load official Indonesian administrative boundaries from the local
+        PostGIS wilayah database.  Returns an empty list (with a warning) if
+        the database is unreachable.
+
+        Levels are queried finest-first (9→8→7): each coarser level only
+        fills areas not already covered by a finer one, so kabupaten
+        boundaries never overlap existing kelurahan polygons.
+
+        bbox: (south, west, north, east)
+        """
+        from src.data.wilayah_loader import WilayahLoader
+        try:
+            loader = WilayahLoader()
+            south, west, north, east = bbox
+            combined: List[Village] = []
+            # Sort finest to coarsest (highest admin_level number = finest)
+            for level in sorted(admin_levels, reverse=True):
+                candidates = loader.load_villages(
+                    bbox=(south, west, north, east),
+                    admin_levels=[level],
+                    population_density_per_km2=population_density_per_km2,
+                    max_population_per_village=max_population_per_village,
+                )
+                added = self._add_uncovered_villages(candidates, combined)
+                if added:
+                    logger.info(
+                        f"wilayah_db L{level}: {len(candidates)} found, "
+                        f"{len(added)} added"
+                    )
+                combined.extend(added)
+            loader.close()
+            return combined
+        except Exception as exc:
+            logger.warning(
+                f"wilayah_db source failed (is Docker running?): {exc} — skipping"
+            )
+            return []
+
+    def _fill_uncovered_l9(
+        self,
+        bbox: tuple,
+        existing_villages: List[Village],
+        house_persons: float = 4.5,
+        min_radius_m: float = 75.0,
+        max_radius_m: float = 200.0,
+    ) -> List[Village]:
+        """
+        For each L9 kelurahan that contains no existing village centroid,
+        create one synthetic circular cluster at the kelurahan centroid.
+
+        Radius = equivalent circle radius of the smallest existing cluster,
+                 clamped to [min_radius_m, max_radius_m].
+        Population = max(1, int(house_persons))  (one household unit).
+        Requires the wilayah PostGIS DB to be running.
+        """
+        import math
+        from pyproj import Transformer
+        from shapely.ops import transform as shp_transform
+        from shapely.strtree import STRtree
+        from shapely.wkt import loads as wkt_loads
+        from src.data.wilayah_loader import WilayahLoader
+
+        try:
+            with WilayahLoader() as loader:
+                l9_villages = loader.load_villages(bbox=bbox, admin_levels=[9])
+        except Exception as exc:
+            logger.warning(f"fill_uncovered_l9: wilayah DB unavailable: {exc}")
+            return []
+
+        if not l9_villages:
+            return []
+
+        # Compute fill radius from smallest real cluster
+        real_areas = [v.area_m2 for v in existing_villages if v.area_m2 > 0]
+        if real_areas:
+            fill_radius_m = math.sqrt(min(real_areas) / math.pi)
+        else:
+            fill_radius_m = min_radius_m
+        fill_radius_m = max(min_radius_m, min(fill_radius_m, max_radius_m))
+
+        # Spatial join: find which L9s have an existing village inside them
+        l9_with_geom = [
+            (v, wkt_loads(v.geometry_wkt))
+            for v in l9_villages if v.geometry_wkt
+        ]
+        if not l9_with_geom:
+            return []
+
+        tree = STRtree([g for _, g in l9_with_geom])
+        covered_ids: set = set()
+        for ev in existing_villages:
+            pt = Point(ev.centroid_lon, ev.centroid_lat)
+            for idx in tree.query(pt):
+                lv, g = l9_with_geom[idx]
+                if g.contains(pt):
+                    covered_ids.add(lv.village_id)
+                    break
+
+        # Build synthetic circular Village for each uncovered L9
+        pop = max(1, int(house_persons))
+        area_m2 = math.pi * fill_radius_m ** 2
+        artificial: List[Village] = []
+
+        for lv in l9_villages:
+            if lv.village_id in covered_ids:
+                continue
+
+            lat, lon = lv.centroid_lat, lv.centroid_lon
+            zone = int((lon + 180) / 6) + 1
+            epsg_utm = f"{'326' if lat >= 0 else '327'}{zone:02d}"
+            to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg_utm}", always_xy=True)
+            to_wgs = Transformer.from_crs(f"EPSG:{epsg_utm}", "EPSG:4326", always_xy=True)
+
+            pt_utm = shp_transform(to_utm.transform, Point(lon, lat))
+            buf_wgs = shp_transform(to_wgs.transform, pt_utm.buffer(fill_radius_m))
+
+            artificial.append(Village(
+                village_id=f"artificial_l9_{lv.village_id}",
+                name=lv.name,
+                centroid_lat=lat,
+                centroid_lon=lon,
+                population=pop,
+                area_m2=area_m2,
+                admin_level=9,
+                geometry_wkt=buf_wgs.wkt,
+            ))
+
+        logger.info(
+            f"fill_uncovered_l9: {len(artificial)} synthetic clusters added "
+            f"(radius={fill_radius_m:.0f} m, pop={pop} each)"
+        )
+        return artificial
+
     def _villages_from_admin_boundary(
         self,
         ox_bbox: tuple,
@@ -236,7 +465,25 @@ class OSMExtractor:
         population_density_per_km2: float,
         max_population_per_village: int,
     ) -> List[Village]:
-        """Extract villages from OSM boundary=administrative polygons."""
+        """
+        Extract villages from OSM boundary=administrative polygons.
+
+        All admin levels are queried independently.  Results are merged
+        from finest to coarsest: each coarser level only fills areas not
+        already covered by a finer level (centroid-outside check).
+        This ensures desa (L9) polygons are kept wherever they exist, with
+        kecamatan (L8) or kabupaten (L7) filling remaining gaps.
+
+        No minimum area filter is applied — any valid polygon is accepted.
+        OSM boundary polygons, however small, represent a real administrative
+        unit that a community identifies with and should be routed independently.
+        """
+        from shapely.wkt import loads as _wkt_loads
+        from shapely.ops import unary_union
+        from shapely.geometry import Point as _Pt
+
+        all_villages: List[Village] = []
+
         for level in admin_levels:
             try:
                 gdf = ox.features_from_bbox(
@@ -254,30 +501,33 @@ class OSMExtractor:
             gdf_poly = gdf[poly_mask].copy()
 
             if gdf_poly.empty:
-                logger.info(f"admin_level={level}: no polygon boundaries found — trying next level")
+                logger.info(f"admin_level={level}: no polygon boundaries found")
                 continue
 
-            min_area_m2 = 100_000.0 if level >= 9 else 500_000.0
-            try:
-                _clon = float(gdf_poly.to_crs("EPSG:4326").geometry.unary_union.centroid.x)
-                _clat = float(gdf_poly.to_crs("EPSG:4326").geometry.unary_union.centroid.y)
-                _zone = int((_clon + 180) / 6) + 1
-                _epsg = (32700 + _zone) if _clat < 0 else (32600 + _zone)
-                gdf_utm = gdf_poly.to_crs(f"EPSG:{_epsg}")
-                gdf_poly = gdf_poly[gdf_utm.geometry.area >= min_area_m2].copy()
-            except Exception:
-                pass
+            new_villages = self._gdf_to_villages(gdf_poly, admin_level=level)
+            self._assign_population_from_area(new_villages, population_density_per_km2, max_population_per_village)
 
-            if gdf_poly.empty:
-                logger.info(f"admin_level={level}: all polygons below area threshold — trying next level")
-                continue
+            # Only add villages whose centroid is not already covered by a finer level
+            if all_villages:
+                polys = []
+                for v in all_villages:
+                    if v.geometry_wkt:
+                        try:
+                            polys.append(_wkt_loads(v.geometry_wkt))
+                        except Exception:
+                            pass
+                covered = unary_union(polys) if polys else None
+                added = []
+                for v in new_villages:
+                    if covered is None or not covered.contains(_Pt(v.centroid_lon, v.centroid_lat)):
+                        added.append(v)
+            else:
+                added = new_villages
 
-            villages = self._gdf_to_villages(gdf_poly, admin_level=level)
-            self._assign_population_from_area(villages, population_density_per_km2, max_population_per_village)
-            logger.info(f"admin_level={level}: {len(villages)} boundary polygons")
-            return villages
+            logger.info(f"admin_level={level}: {len(new_villages)} polygons found, {len(added)} added")
+            all_villages.extend(added)
 
-        return []
+        return all_villages
 
     def _villages_from_place_nodes(
         self,
@@ -359,7 +609,51 @@ class OSMExtractor:
                 geometry_wkt=geom_wkt,
             ))
 
-        # Summary: show radius range across place types used
+        # Deduplicate place-nodes by area: sort smallest first, reject any candidate
+        # whose polygon overlaps an already-accepted polygon by >overlap_threshold.
+        # This means a hamlet circle inside a town circle wins — keeping the finest
+        # granularity available and discarding the larger synthetic area.
+        villages.sort(key=lambda v: v.area_m2)
+        # Deduplicate place-nodes by clipping each candidate to its uncovered area.
+        # Candidates are processed smallest-first so finer-grained settlements
+        # take priority. Each candidate's circle is clipped against the union of
+        # already-accepted polygons; the clipped polygon and proportionally scaled
+        # population are stored. A candidate is dropped only if less than 10% of
+        # its circle remains uncovered after clipping.
+        villages.sort(key=lambda v: v.area_m2)
+        accepted: List[Village] = []
+        from shapely.wkt import loads as _wkt_loads2
+        from shapely.ops import unary_union as _unary_union2
+        accepted_polys = []
+        min_remaining_fraction = 0.10  # drop if <10% of circle is uncovered
+
+        for v in villages:
+            if v.geometry_wkt:
+                try:
+                    cand_poly = _wkt_loads2(v.geometry_wkt)
+                    orig_area = cand_poly.area
+                    if accepted_polys and orig_area > 0:
+                        covered = _unary_union2(accepted_polys)
+                        clipped  = cand_poly.difference(covered)
+                        remaining_frac = clipped.area / orig_area
+                        if remaining_frac < min_remaining_fraction:
+                            continue  # almost entirely covered — skip
+                        if remaining_frac < 0.99:
+                            # Partially clipped — update geometry and scale population
+                            v.geometry_wkt = clipped.wkt
+                            v.area_m2      = float(clipped.area)
+                            v.population   = max(1, int(v.population * remaining_frac))
+                            accepted_polys.append(clipped)
+                        else:
+                            accepted_polys.append(cand_poly)
+                    else:
+                        accepted_polys.append(cand_poly)
+                    accepted.append(v)
+                    continue
+                except Exception:
+                    pass
+            accepted.append(v)  # no geometry — keep as-is
+
         if villages:
             radii = sorted({
                 float((place_settings.get(str(r.get("place", "") or ""), {})).get(
@@ -367,10 +661,10 @@ class OSMExtractor:
                 for _, r in gdf_pts.iterrows()
             })
             logger.info(
-                f"place-nodes: {len(villages)} settlements "
+                f"place-nodes: {len(villages)} raw → {len(accepted)} after clip-dedup "
                 f"(radius {radii[0]:.0f}–{radii[-1]:.0f} m, per-tag density)"
             )
-        return villages
+        return accepted
 
     def _villages_from_building_clusters(
         self,
@@ -380,6 +674,8 @@ class OSMExtractor:
         persons_per_dwelling: float,
         building_persons: dict,
         max_population_per_village: int,
+        max_area_km2: float = 25.0,
+        use_cache: bool = True,
     ) -> List[Village]:
         """
         Extract villages by DBSCAN-clustering OSM building footprints.
@@ -391,6 +687,10 @@ class OSMExtractor:
         persons_per_dwelling. Types explicitly set to 0 (e.g. commercial,
         religious) are excluded from the population count.
         """
+        logger.info(f"building_clusters: querying OSM building footprints …")
+        _prev_oxcache = ox.settings.use_cache
+        if not use_cache:
+            ox.settings.use_cache = False
         try:
             gdf = ox.features_from_bbox(
                 bbox=ox_bbox,
@@ -399,9 +699,14 @@ class OSMExtractor:
         except Exception as e:
             logger.warning(f"building query failed: {e}")
             return []
+        finally:
+            ox.settings.use_cache = _prev_oxcache
 
         if gdf.empty:
+            logger.info("building_clusters: no buildings found in bbox")
             return []
+
+        logger.info(f"building_clusters: {len(gdf):,} buildings fetched — projecting to UTM …")
 
         # Compute centroids in WGS84, reproject to local UTM for metric DBSCAN
         gdf_wgs = gdf.to_crs("EPSG:4326")
@@ -416,7 +721,6 @@ class OSMExtractor:
 
         try:
             import pyproj
-            from shapely.ops import transform as _transform
             to_utm = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform
             to_wgs = pyproj.Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True).transform
             gdf_utm = gdf_wgs.to_crs(f"EPSG:{epsg}")
@@ -432,65 +736,105 @@ class OSMExtractor:
         try:
             from sklearn.cluster import DBSCAN
             import numpy as np
-            labels = DBSCAN(eps=eps_m, min_samples=min_buildings).fit_predict(
-                np.array(coords)
-            )
         except ImportError:
             logger.warning("building_clusters: scikit-learn not installed — skipping")
             return []
 
-        villages = []
-        for cluster_id in set(labels):
-            if cluster_id == -1:
-                continue  # noise
-            mask = labels == cluster_id
-            cluster_pts_utm = [coords[i] for i, m in enumerate(mask) if m]
-            cluster_rows = [i for i, m in enumerate(mask) if m]
+        from shapely.geometry import Point as _Pt
+        from shapely.ops import transform as _transform, unary_union as _unary_union
 
-            from shapely.geometry import MultiPoint as _MP, Point as _Pt
-            from shapely.ops import transform as _transform
-            hull_utm = _MP([_Pt(x, y) for x, y in cluster_pts_utm]).convex_hull
-            # Degenerate hulls (Point or LineString) occur when all buildings are
-            # collinear or only 2 buildings exist — buffer to a thin polygon
-            if hull_utm.geom_type not in ("Polygon", "MultiPolygon"):
-                hull_utm = hull_utm.buffer(max(eps_m * 0.1, 10.0))
-            hull_wgs = _transform(to_wgs, hull_utm)
+        def _cluster_polygon(c_pts: list, eps: float):
+            """
+            Build a non-overlapping polygon for a cluster by unioning per-building
+            buffers of radius eps/2.
 
-            centroid_utm = hull_utm.centroid
-            centroid_wgs = _transform(to_wgs, centroid_utm)
-            area_m2 = float(hull_utm.area)
+            Why eps/2: DBSCAN guarantees any two buildings in *different* clusters
+            are more than eps apart. Buffering each building by eps/2 therefore
+            produces buffers that cannot overlap across cluster boundaries —
+            non-overlap is guaranteed by construction, not by post-processing.
+            The union of same-cluster buffers produces a connected shape that
+            follows the actual settlement footprint rather than a convex envelope.
+            """
+            buf_r = eps / 2.0
+            polys = [_Pt(x, y).buffer(buf_r) for x, y in c_pts]
+            return _unary_union(polys)
 
-            # Name from most common name tag in cluster; population from per-type occupancy
-            name_counts: dict = {}
-            total_persons = 0.0
-            for i in cluster_rows:
-                try:
-                    row_wgs = gdf_wgs.iloc[i]
-                    n = str(row_wgs.get("name", ""))
-                    if n and n != "None":
-                        name_counts[n] = name_counts.get(n, 0) + 1
-                    btype = str(row_wgs.get("building", "yes") or "yes").strip().lower()
-                    occupancy = building_persons.get(btype, persons_per_dwelling)
-                    total_persons += occupancy
-                except Exception:
-                    total_persons += persons_per_dwelling
-            name = max(name_counts, key=name_counts.get) if name_counts else f"cluster_{cluster_id}"
+        def _clusters_to_villages(
+            pts_utm: list,
+            row_indices: list,
+            eps: float,
+            id_prefix: str,
+        ) -> List[Village]:
+            """
+            Run DBSCAN(eps, min_samples=1) on pts_utm.
+            Clusters exceeding max_area_km2 are recursively re-clustered at
+            eps/2, down to a minimum eps of 10 m (single-building clusters).
+            Returns a flat list of Village objects.
+            """
+            labels = DBSCAN(eps=eps, min_samples=1).fit_predict(np.array(pts_utm))
+            result: List[Village] = []
 
-            pop = max(1, min(int(total_persons), max_population_per_village))
-            villages.append(Village(
-                village_id=f"bldg_cluster_{cluster_id}",
-                name=name,
-                centroid_lat=float(centroid_wgs.y),
-                centroid_lon=float(centroid_wgs.x),
-                population=pop,
-                area_m2=area_m2,
-                admin_level=11,
-                geometry_wkt=hull_wgs.wkt,
-            ))
+            for cid in set(labels):
+                mask = [l == cid for l in labels]
+                c_pts  = [pts_utm[i]    for i, m in enumerate(mask) if m]
+                c_rows = [row_indices[i] for i, m in enumerate(mask) if m]
+
+                poly_utm = _cluster_polygon(c_pts, eps)
+                area_m2  = float(poly_utm.area)
+
+                # Recursively subdivide oversized clusters by halving eps
+                if max_area_km2 > 0 and area_m2 > max_area_km2 * 1e6:
+                    new_eps = eps / 2.0
+                    if new_eps >= 10.0:
+                        result.extend(_clusters_to_villages(
+                            c_pts, c_rows, new_eps, f"{id_prefix}_{cid}"
+                        ))
+                        continue
+                    # eps floor reached — accept as-is to avoid infinite recursion
+                    logger.debug(
+                        f"building_clusters: cluster {id_prefix}_{cid} "
+                        f"area={area_m2/1e6:.1f} km² — eps floor reached, keeping"
+                    )
+
+                poly_wgs     = _transform(to_wgs, poly_utm)
+                centroid_wgs = _transform(to_wgs, poly_utm.centroid)
+
+                name_counts: dict = {}
+                total_persons = 0.0
+                for i in c_rows:
+                    try:
+                        row_wgs = gdf_wgs.iloc[i]
+                        n = str(row_wgs.get("name", ""))
+                        if n and n not in ("None", "nan"):
+                            name_counts[n] = name_counts.get(n, 0) + 1
+                        btype = str(row_wgs.get("building", "yes") or "yes").strip().lower()
+                        total_persons += building_persons.get(btype, persons_per_dwelling)
+                    except Exception:
+                        total_persons += persons_per_dwelling
+
+                name = max(name_counts, key=name_counts.get) if name_counts else f"cluster_{id_prefix}_{cid}"
+                pop  = max(1, min(int(total_persons), max_population_per_village))
+
+                result.append(Village(
+                    village_id=f"bldg_cluster_{id_prefix}_{cid}",
+                    name=name,
+                    centroid_lat=float(centroid_wgs.y),
+                    centroid_lon=float(centroid_wgs.x),
+                    population=pop,
+                    area_m2=area_m2,
+                    admin_level=11,
+                    geometry_wkt=poly_wgs.wkt,
+                ))
+            return result
+
+        logger.info(f"building_clusters: running DBSCAN on {len(coords):,} building centroids "
+                    f"(eps={eps_m} m, min_buildings={min_buildings}) …")
+        all_indices = list(range(len(coords)))
+        villages = _clusters_to_villages(coords, all_indices, eps_m, "0")
 
         logger.info(
             f"building_clusters: {len(villages)} clusters "
-            f"(eps={eps_m} m, min_buildings={min_buildings}, "
+            f"(eps={eps_m} m, min_samples=1, recursive subdivision to 10 m, "
             f"persons_per_dwelling={persons_per_dwelling})"
         )
         return villages
@@ -499,16 +843,27 @@ class OSMExtractor:
         self,
         candidates: List[Village],
         existing: List[Village],
+        overlap_threshold: float = 0.3,
     ) -> List[Village]:
         """
-        Return candidates whose centroid is NOT inside any existing village polygon.
-        If existing is empty, all candidates are returned.
+        Return candidates that do NOT significantly overlap any existing village polygon.
+
+        A candidate is rejected if the intersection of its polygon with the union
+        of existing polygons exceeds ``overlap_threshold`` × candidate area.
+        Default threshold 0.3 means a candidate is dropped if more than 30% of
+        its area is already covered — preventing double-counting while still
+        allowing place-node circles that extend beyond admin-boundary edges.
+
+        Falls back to centroid-in-polygon for candidates without geometry_wkt,
+        preserving original behaviour for node-only records.
+
+        If existing is empty, all candidates are returned unchanged.
         """
         if not existing:
             return candidates
 
-        from shapely.geometry import Point as _Pt
         from shapely.wkt import loads as _wkt_loads
+        from shapely.geometry import Point as _Pt
         from shapely.ops import unary_union
 
         polys = []
@@ -524,9 +879,19 @@ class OSMExtractor:
         covered = unary_union(polys)
         added = []
         for c in candidates:
-            pt = _Pt(c.centroid_lon, c.centroid_lat)
-            if not covered.contains(pt):
-                added.append(c)
+            if c.geometry_wkt:
+                try:
+                    cand_poly = _wkt_loads(c.geometry_wkt)
+                    inter_area = cand_poly.intersection(covered).area
+                    cand_area  = cand_poly.area
+                    if cand_area > 0 and (inter_area / cand_area) > overlap_threshold:
+                        continue   # too much overlap — already covered
+                except Exception:
+                    pass   # fall through to centroid check
+            # Fallback: centroid check for candidates without valid geometry
+            if covered.contains(_Pt(c.centroid_lon, c.centroid_lat)):
+                continue
+            added.append(c)
         return added
 
     def _assign_population_from_area(
@@ -550,6 +915,8 @@ class OSMExtractor:
         min_area_m2: float = 1000.0,
         m2_per_person: float = 2.0,
         use_cache: bool = True,
+        cluster_eps_m: float = 250.0,
+        cluster_min_shelters: int = 1,
     ) -> List[Shelter]:
         """
         Extract shelter locations as boundary polygons only.
@@ -573,10 +940,10 @@ class OSMExtractor:
             }
 
         bbox = region.to_bbox()
-        # Cache key encodes tag fingerprint + area threshold
+        # Cache key encodes tag fingerprint + area + cluster params
         import hashlib as _hl
         tag_sig = _hl.md5(str(sorted(str(shelter_tags).split())).encode()).hexdigest()[:8]
-        variant = f"poly_a{int(min_area_m2)}_t{tag_sig}"
+        variant = f"poly_a{int(min_area_m2)}_t{tag_sig}_eps{int(cluster_eps_m)}_min{cluster_min_shelters}"
         cache_key = self._cache_key("shelters", bbox, variant)
         cache_path = self.cache_dir / f"{cache_key}.geojson"
 
@@ -589,21 +956,55 @@ class OSMExtractor:
 
         south, west, north, east = bbox
         ox_bbox = (west, south, east, north)
+
+        # ── Incremental / resume support ──────────────────────────────────
+        # Partial cache stores raw (pre-cluster) shelters per completed tag.
+        # If killed mid-way, we resume from where we left off.
+        partial_path = cache_path.with_suffix(".partial.json")
+        completed_tags: set = set()
         shelters: List[Shelter] = []
 
+        if use_cache and partial_path.exists():
+            try:
+                with open(partial_path) as f:
+                    partial = json.load(f)
+                completed_tags = set(partial.get("completed_tags", []))
+                shelters = self._load_shelters_from_records(partial.get("shelters", []))
+                logger.info(
+                    f"Resuming shelter extraction: {len(completed_tags)} tags already done, "
+                    f"{len(shelters)} shelters loaded from partial cache"
+                )
+            except Exception as e:
+                logger.warning(f"Could not load partial shelter cache ({e}) — starting fresh")
+                completed_tags = set()
+                shelters = []
+
+        n_tags = sum(len(v) if isinstance(v, list) else 1 for v in shelter_tags.values())
+        logger.info(f"Querying {n_tags} shelter tag combinations from OSM …")
+        tag_idx = 0
         for tag_key, tag_values in shelter_tags.items():
             for val in (tag_values if isinstance(tag_values, list) else [tag_values]):
+                tag_idx += 1
+                tag_label = f"{tag_key}={val}"
+                if tag_label in completed_tags:
+                    logger.info(f"  [{tag_idx}/{n_tags}] {tag_label} … (cached)")
+                    continue
+                logger.info(f"  [{tag_idx}/{n_tags}] {tag_label} …")
                 try:
                     gdf = ox.features_from_bbox(bbox=ox_bbox, tags={tag_key: val})
                 except Exception as e:
-                    logger.debug(f"No {tag_key}={val} found: {e}")
+                    logger.debug(f"No {tag_label} found: {e}")
+                    completed_tags.add(tag_label)
+                    self._save_shelter_partial(partial_path, completed_tags, shelters)
                     continue
 
                 # Keep only closed polygons
                 poly_mask = gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])
                 gdf_poly = gdf[poly_mask].copy()
                 if gdf_poly.empty:
-                    logger.debug(f"{tag_key}={val}: no polygon features")
+                    logger.debug(f"{tag_label}: no polygon features")
+                    completed_tags.add(tag_label)
+                    self._save_shelter_partial(partial_path, completed_tags, shelters)
                     continue
 
                 # Area filter in UTM for accuracy
@@ -618,18 +1019,123 @@ class OSMExtractor:
                 raw = self._gdf_to_shelters(gdf_poly, shelter_type=val,
                                             areas_m2=areas_m2,
                                             m2_per_person=m2_per_person)
-                logger.info(f"  {tag_key}={val}: {len(raw)} polygon shelters "
+                logger.info(f"  {tag_label}: {len(raw)} polygon shelters "
                             f"(≥{min_area_m2:.0f} m²)")
                 shelters += raw
+                completed_tags.add(tag_label)
+                self._save_shelter_partial(partial_path, completed_tags, shelters)
 
         shelters = self._deduplicate_shelters(shelters)
+        shelters = self._cluster_shelters(shelters, cluster_eps_m, cluster_min_shelters)
         self._save_shelters_cache(cache_path, shelters)
+        # Remove partial cache — full cache is now written
+        if partial_path.exists():
+            partial_path.unlink()
         total_cap = sum(s.capacity for s in shelters)
         logger.info(
-            f"Extracted {len(shelters)} shelter polygons "
-            f"(min_area={min_area_m2:.0f} m², total_capacity={total_cap:,})"
+            f"Extracted {len(shelters)} shelter clusters "
+            f"(min_area={min_area_m2:.0f} m², eps={cluster_eps_m:.0f} m, "
+            f"total_capacity={total_cap:,})"
         )
         return shelters
+
+    def _cluster_shelters(
+        self,
+        shelters: List[Shelter],
+        eps_m: float,
+        min_samples: int,
+    ) -> List[Shelter]:
+        """
+        DBSCAN-cluster nearby shelters into a single shelter destination.
+        Clustered shelters share a merged polygon (union), summed capacity,
+        and centroid. Noise points (unclustered) are kept as-is.
+        """
+        if len(shelters) < 2:
+            return shelters
+
+        import math as _math
+        import numpy as np
+        from sklearn.cluster import DBSCAN
+        from pyproj import Transformer
+        from shapely.geometry import Point as _ShapelyPoint, Polygon as _ShapelyPolygon
+        from shapely.ops import unary_union
+        from shapely.wkt import loads as wkt_loads
+
+        def _circle_wkt_utm(cx_utm: float, cy_utm: float, area_m2: float,
+                             to_wgs: Transformer) -> str:
+            """
+            Create a circular polygon WKT in WGS84 centered at a UTM point,
+            with area equivalent to area_m2.  Resolution = 64 segments.
+            """
+            radius_m = _math.sqrt(max(area_m2, 1.0) / _math.pi)
+            circle_utm = _ShapelyPoint(cx_utm, cy_utm).buffer(radius_m, resolution=64)
+            # Transform exterior ring from UTM → WGS84
+            wgs_pts = [to_wgs.transform(x, y) for x, y in circle_utm.exterior.coords]
+            # to_wgs returns (lon, lat); Shapely Polygon takes (x=lon, y=lat)
+            return _ShapelyPolygon(wgs_pts).wkt
+
+        # Project centroids to UTM for metric distance
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:32749", always_xy=True)
+        coords = np.array([
+            transformer.transform(s.centroid_lon, s.centroid_lat)
+            for s in shelters
+        ])
+
+        labels = DBSCAN(
+            eps=eps_m, min_samples=min_samples, metric="euclidean"
+        ).fit_predict(coords)
+
+        to_wgs = Transformer.from_crs("EPSG:32749", "EPSG:4326", always_xy=True)
+        clustered: List[Shelter] = []
+
+        for cid in set(labels):
+            members = [s for s, l in zip(shelters, labels) if l == cid]
+
+            # Summed capacity and area (applies to both single and merged)
+            total_cap = sum(s.capacity for s in members)
+            total_area = sum(s.area_m2 for s in members)
+
+            if len(members) == 1:
+                s = members[0]
+                # Circularize single-shelter geometry too — OSM buildings are rectangles
+                cx_utm, cy_utm = transformer.transform(s.centroid_lon, s.centroid_lat)
+                circle_wkt = _circle_wkt_utm(cx_utm, cy_utm, s.area_m2, to_wgs)
+                s.geometry_wkt = circle_wkt
+                clustered.append(s)
+                continue
+
+            # Merged cluster: centroid is mean of member centroids in UTM
+            cx_utm = sum(coords[i][0] for i, l in enumerate(labels) if l == cid) / len(members)
+            cy_utm = sum(coords[i][1] for i, l in enumerate(labels) if l == cid) / len(members)
+            clon, clat = to_wgs.transform(cx_utm, cy_utm)
+
+            # Circular geometry of total area
+            circle_wkt = _circle_wkt_utm(cx_utm, cy_utm, total_area, to_wgs)
+
+            # Representative name: most common non-empty name among members
+            names = [s.name for s in members if s.name]
+            name = max(set(names), key=names.count) if names else members[0].shelter_id
+
+            # Representative type: most common type
+            types = [s.shelter_type for s in members]
+            shelter_type = max(set(types), key=types.count)
+
+            clustered.append(Shelter(
+                shelter_id=f"shelter_cluster_{cid}",
+                name=name,
+                centroid_lat=clat,
+                centroid_lon=clon,
+                capacity=total_cap,
+                shelter_type=shelter_type,
+                area_m2=total_area,
+                geometry_wkt=circle_wkt,
+            ))
+
+        n_orig = len(shelters)
+        n_clus = len(clustered)
+        if n_clus < n_orig:
+            logger.info(f"  Shelter clustering: {n_orig} → {n_clus} clusters (eps={eps_m:.0f} m)")
+        return clustered
 
     # ------------------------------------------------------------------ #
     # Load pre-extracted files
@@ -974,6 +1480,86 @@ class OSMExtractor:
             ))
         return villages
 
+    def _village_to_record(self, v: Village) -> dict:
+        """Serialize a Village to a plain dict for partial cache storage."""
+        return {
+            "village_id":   v.village_id,
+            "name":         v.name,
+            "centroid_lat": v.centroid_lat,
+            "centroid_lon": v.centroid_lon,
+            "population":   v.population,
+            "area_m2":      v.area_m2,
+            "admin_level":  v.admin_level,
+            "geometry_wkt": v.geometry_wkt,
+        }
+
+    def _load_villages_from_records(self, records: list) -> List[Village]:
+        """Deserialize Village list from plain dicts (partial cache)."""
+        villages = []
+        for i, r in enumerate(records):
+            villages.append(Village(
+                village_id=str(r.get("village_id", i)),
+                name=str(r.get("name", f"village_{i}")),
+                centroid_lat=float(r.get("centroid_lat", 0.0)),
+                centroid_lon=float(r.get("centroid_lon", 0.0)),
+                population=int(r.get("population", 0)),
+                area_m2=float(r.get("area_m2", 0.0)),
+                admin_level=int(r.get("admin_level", 9)),
+                geometry_wkt=r.get("geometry_wkt"),
+            ))
+        return villages
+
+    def _save_village_partial(self, path: Path, completed_sources: set, villages: List[Village]):
+        """Save incremental village progress to a partial cache file."""
+        try:
+            with open(path, "w") as f:
+                json.dump({
+                    "completed_sources": sorted(completed_sources),
+                    "villages": [self._village_to_record(v) for v in villages],
+                }, f)
+        except Exception as e:
+            logger.warning(f"Could not write partial village cache: {e}")
+
+    def _shelter_to_record(self, s: Shelter) -> dict:
+        """Serialize a Shelter to a plain dict for partial cache storage."""
+        return {
+            "shelter_id":   s.shelter_id,
+            "name":         s.name,
+            "centroid_lat": s.centroid_lat,
+            "centroid_lon": s.centroid_lon,
+            "capacity":     s.capacity,
+            "area_m2":      s.area_m2,
+            "shelter_type": s.shelter_type,
+            "geometry_wkt": s.geometry_wkt,
+        }
+
+    def _load_shelters_from_records(self, records: list) -> List[Shelter]:
+        """Deserialize Shelter list from plain dicts (partial cache)."""
+        shelters = []
+        for i, r in enumerate(records):
+            shelters.append(Shelter(
+                shelter_id=str(r.get("shelter_id", i)),
+                name=str(r.get("name", f"shelter_{i}")),
+                centroid_lat=float(r.get("centroid_lat", 0.0)),
+                centroid_lon=float(r.get("centroid_lon", 0.0)),
+                capacity=int(r.get("capacity", 0)),
+                shelter_type=str(r.get("shelter_type", "shelter")),
+                area_m2=float(r.get("area_m2", 0.0)),
+                geometry_wkt=r.get("geometry_wkt"),
+            ))
+        return shelters
+
+    def _save_shelter_partial(self, path: Path, completed_tags: set, shelters: List[Shelter]):
+        """Save incremental shelter progress to a partial cache file."""
+        try:
+            with open(path, "w") as f:
+                json.dump({
+                    "completed_tags": sorted(completed_tags),
+                    "shelters": [self._shelter_to_record(s) for s in shelters],
+                }, f)
+        except Exception as e:
+            logger.warning(f"Could not write partial shelter cache: {e}")
+
     def _save_shelters_cache(self, path: Path, shelters: List[Shelter]):
         from shapely.wkt import loads as _wkt_loads
         from shapely.geometry import mapping as _mapping
@@ -1134,60 +1720,3 @@ class OSMExtractor:
         )
         return villages, shelters
 
-    def export_to_pycgr(
-        self,
-        nodes: "List[NetworkNode]",
-        edges: "List[NetworkEdge]",
-        path: str,
-    ) -> None:
-        """
-        Export road network to PYCGR text format (RespondOR v1 / OsmToRoadGraph).
-
-        Format:
-          # comment lines
-          n_nodes
-          n_edges
-          node_id lat lon          (one per line)
-          src tgt length highway max_speed bidirectional   (one per line)
-        """
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            f.write("# Road Graph File — exported by RespondOR-EvacuationRoute\n")
-            f.write(f"# nodes: {len(nodes)}  edges: {len(edges)}\n")
-            f.write(f"{len(nodes)}\n")
-            f.write(f"{len(edges)}\n")
-            for n in nodes:
-                f.write(f"{n.node_id} {n.lat} {n.lon}\n")
-            for e in edges:
-                bidir = 1 if e.bidirectional else 0
-                spd = int(e.max_speed_kmh) if e.max_speed_kmh == e.max_speed_kmh else 30
-                f.write(
-                    f"{e.source_id} {e.target_id} "
-                    f"{e.length_m:.2f} {e.highway_type} {spd} {bidir}\n"
-                )
-        logger.info(f"Exported {len(nodes)} nodes, {len(edges)} edges to {path}")
-
-    def export_pois_to_csv(
-        self,
-        villages: "List[Village]",
-        shelters: "List[Shelter]",
-        path: str,
-    ) -> None:
-        """
-        Export villages and shelters to legacy POI CSV format.
-
-        Output: name,type,latitude,longitude  (no header, no node_id column)
-        """
-        import pandas as pd
-
-        rows = (
-            [{"name": v.name, "type": "village",
-              "latitude": v.centroid_lat, "longitude": v.centroid_lon}
-             for v in villages]
-            + [{"name": s.name, "type": s.shelter_type or "shelter",
-                "latitude": s.centroid_lat, "longitude": s.centroid_lon}
-               for s in shelters]
-        )
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(rows).to_csv(path, index=False, header=False)
-        logger.info(f"Exported {len(villages)} villages + {len(shelters)} shelters to {path}")

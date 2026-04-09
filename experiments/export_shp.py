@@ -20,7 +20,6 @@ Usage:
 import argparse
 import json
 import logging
-import math
 import sys
 from pathlib import Path
 
@@ -29,7 +28,8 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Point, shape
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+from src.utils.logging_setup import setup_logging as _setup_logging
+_setup_logging("export_shp")
 logger = logging.getLogger("export_shp")
 
 CRS = "EPSG:4326"  # WGS84 — standard for GAMA
@@ -59,20 +59,6 @@ def load_app_config(config_path: Path):
     from src.config.config_loader import load_config
     return load_config(config_path)
 
-
-def _region_bbox(cfg) -> tuple:
-    """Return (west, south, east, north) from AppConfig region."""
-    region = cfg.region
-    if region.region_type == "bbox":
-        south, west, north, east = region.bbox
-    else:
-        lat, lon = region.center
-        r = region.radius_km
-        dlat = r / 111.0
-        dlon = r / (111.0 * math.cos(math.radians(lat)))
-        south, north = lat - dlat, lat + dlat
-        west,  east  = lon - dlon, lon + dlon
-    return west, south, east, north
 
 
 def _disaster_center(cfg) -> tuple:
@@ -128,49 +114,45 @@ def _parse_speed(raw, highway_type: str, road_types: dict) -> float:
         return default
 
 
-def _latest_geojson(cache_dir: Path, pattern: str) -> Path:
-    """Return the most recently modified file matching pattern, or exit."""
-    candidates = sorted(cache_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
-    if not candidates:
-        logger.error(f"No {pattern} found in {cache_dir}. Run the main pipeline first.")
-        sys.exit(1)
-    return candidates[-1]
-
-
-def _load_geojson_features(path: Path) -> list:
-    with open(path) as f:
-        return json.load(f).get("features", [])
-
-
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_villages(cache_dir: Path, pop_density: float) -> gpd.GeoDataFrame:
+def load_villages(extractor, region, cfg) -> gpd.GeoDataFrame:
+    """Load villages via OSMExtractor (uses correct bbox-keyed cache file)."""
     logger.info("Loading villages from cache …")
-    path = _latest_geojson(cache_dir, "villages_*.geojson")
-    logger.info(f"  {path}")
+    villages = extractor.extract_villages(
+        region,
+        admin_levels=cfg.extraction.village_admin_levels,
+        population_density_per_km2=cfg.extraction.village_pop_density,
+        max_population_per_village=cfg.extraction.village_max_pop,
+        use_cache=cfg.extraction.use_cached_osm,
+        sources=cfg.extraction.village_sources,
+        cluster_eps_m=cfg.extraction.village_cluster_eps_m,
+        cluster_min_buildings=cfg.extraction.village_cluster_min_buildings,
+        cluster_max_area_km2=cfg.extraction.village_cluster_max_area_km2,
+        persons_per_dwelling=cfg.extraction.village_persons_per_dwelling,
+        building_persons=cfg.extraction.village_building_persons,
+        fill_uncovered_l9=cfg.extraction.village_fill_uncovered_l9,
+    )
 
     rows = []
-    for feat in _load_geojson_features(path):
-        props = feat.get("properties", {})
-        geom_raw = feat.get("geometry")
-        if not geom_raw:
-            continue
+    for v in villages:
         try:
-            geom = shape(geom_raw)
+            geom = shape({"type": "Point", "coordinates": [v.centroid_lon, v.centroid_lat]}) \
+                if not v.geometry_wkt else __import__("shapely.wkt", fromlist=["loads"]).loads(v.geometry_wkt)
         except Exception:
-            continue
+            geom = shape({"type": "Point", "coordinates": [v.centroid_lon, v.centroid_lat]})
         rows.append({
-            "village_id": str(props.get("village_id", "")),
-            "name":       str(props.get("name", ""))[:80],
-            "population": int(props.get("population", 0)),
-            "area_m2":    float(props.get("area_m2", 0.0)),
-            "admin_lvl":  int(props.get("admin_level", 9)),
+            "village_id": v.village_id,
+            "name":       str(v.name)[:80],
+            "population": v.population,
+            "area_m2":    v.area_m2,
+            "admin_lvl":  v.admin_level,
             "geometry":   geom,
         })
 
     gdf = gpd.GeoDataFrame(rows, crs=CRS)
+    pop_density = cfg.extraction.village_pop_density
 
-    # Fill missing population from area
     zero = gdf["population"] == 0
     if zero.any():
         estimated = ((gdf.loc[zero, "area_m2"] / 1e6) * pop_density).clip(upper=50000).astype(int)
@@ -182,33 +164,38 @@ def load_villages(cache_dir: Path, pop_density: float) -> gpd.GeoDataFrame:
     return gdf
 
 
-def load_shelters(cache_dir: Path, m2_per_person: float) -> gpd.GeoDataFrame:
+def load_shelters(extractor, region, cfg) -> gpd.GeoDataFrame:
+    """Load shelters via OSMExtractor (uses correct bbox-keyed cache file)."""
     logger.info("Loading shelters from cache …")
-    path = _latest_geojson(cache_dir, "shelters_*.geojson")
-    logger.info(f"  {path}")
+    shelters = extractor.extract_shelters(
+        region,
+        shelter_tags=cfg.extraction.shelter_tags,
+        min_area_m2=cfg.extraction.shelter_min_area_m2,
+        m2_per_person=cfg.extraction.shelter_m2_per_person,
+        use_cache=cfg.extraction.use_cached_osm,
+        cluster_eps_m=cfg.extraction.shelter_cluster_eps_m,
+        cluster_min_shelters=cfg.extraction.shelter_cluster_min_shelters,
+    )
 
     rows = []
-    for feat in _load_geojson_features(path):
-        props = feat.get("properties", {})
-        geom_raw = feat.get("geometry")
-        if not geom_raw:
-            continue
+    for s in shelters:
         try:
-            geom = shape(geom_raw)
+            geom = shape({"type": "Point", "coordinates": [s.centroid_lon, s.centroid_lat]}) \
+                if not s.geometry_wkt else __import__("shapely.wkt", fromlist=["loads"]).loads(s.geometry_wkt)
         except Exception:
-            continue
+            geom = shape({"type": "Point", "coordinates": [s.centroid_lon, s.centroid_lat]})
         rows.append({
-            "shelter_id": str(props.get("shelter_id", "")),
-            "name":       str(props.get("name", ""))[:80],
-            "capacity":   int(props.get("capacity", 0)),
-            "area_m2":    float(props.get("area_m2", 0.0)),
-            "shlt_type":  str(props.get("shelter_type", "shelter"))[:30],
+            "shelter_id": s.shelter_id,
+            "name":       str(s.name)[:80],
+            "capacity":   s.capacity,
+            "area_m2":    s.area_m2,
+            "shlt_type":  str(s.shelter_type)[:30],
             "geometry":   geom,
         })
 
+    m2_per_person = cfg.extraction.shelter_m2_per_person
     gdf = gpd.GeoDataFrame(rows, crs=CRS)
 
-    # Fill missing capacity from area
     zero = gdf["capacity"] == 0
     if zero.any():
         estimated = (gdf.loc[zero, "area_m2"] / m2_per_person).clip(lower=10).astype(int)
@@ -220,27 +207,11 @@ def load_shelters(cache_dir: Path, m2_per_person: float) -> gpd.GeoDataFrame:
     return gdf
 
 
-def load_roads(bbox: tuple, osm_cache: Path, road_types: dict,
+def load_roads(region, extractor, road_types: dict,
                network_type: str = "all") -> gpd.GeoDataFrame:
-    """Load and filter road network from OSM (uses HTTP cache)."""
-    logger.info("Loading road network via osmnx …")
-    try:
-        import osmnx as ox
-        ox.settings.use_cache = True
-        ox.settings.cache_folder = str(osm_cache)
-        ox.settings.log_console = False
-    except ImportError:
-        logger.error("osmnx not installed: pip install osmnx")
-        sys.exit(1)
-
-    west, south, east, north = bbox
-    G = ox.graph_from_bbox(
-        bbox=(west, south, east, north),
-        network_type=network_type,
-        retain_all=True,
-        simplify=True,
-    )
-    _, edges_gdf = ox.graph_to_gdfs(G)
+    """Load and filter road network from OSM via OSMExtractor."""
+    logger.info("Loading road network via OSMExtractor …")
+    _, edges_gdf = extractor.extract_road_network_gdf(region, network_type=network_type)
     edges_gdf = edges_gdf.reset_index()
 
     rows, skipped = [], 0
@@ -617,18 +588,21 @@ def main():
     cfg = load_app_config(config_path)
 
     out_dir       = Path(cfg.output_dir) / "gama_shp"
-    cache_dir     = Path(cfg.extraction.osm_cache_dir)
-    osm_http_cache = Path("data/raw/osm_cache/http")
     risk_cache    = out_dir / "risk_cache.json"
-    bbox          = _region_bbox(cfg)
     center_lat, center_lon = _disaster_center(cfg)
-    from src.data.models import DisasterType as _DisasterType
+    from src.data.models import DisasterType as _DisasterType, RegionOfInterest, RegionType
+    from src.data.osm_extractor import OSMExtractor
     disaster_type = _DisasterType(cfg.disaster.disaster_type)
     road_types    = cfg.extraction.road_types
-    pop_density   = cfg.extraction.village_pop_density
-    m2_per_person = cfg.extraction.shelter_m2_per_person
     batch_size    = cfg.extraction.inarisk_batch_size
     rate_limit_s  = cfg.extraction.inarisk_rate_limit_s
+    region = RegionOfInterest(
+        region_type=RegionType(cfg.region.region_type),
+        bbox=tuple(cfg.region.bbox) if cfg.region.bbox else None,
+        center=tuple(cfg.region.center) if cfg.region.center else None,
+        radius_km=cfg.region.radius_km,
+    )
+    extractor = OSMExtractor(cache_dir=cfg.extraction.osm_cache_dir)
 
     logger.info("=" * 60)
     logger.info(f"RespondOR — GAMA SHP Export: {cfg.disaster.name}")
@@ -637,14 +611,22 @@ def main():
     logger.info(f"Disaster  : {disaster_type.value}  severity={cfg.disaster.severity}")
     logger.info("=" * 60)
 
-    villages = load_villages(cache_dir, pop_density)
-    shelters = load_shelters(cache_dir, m2_per_person)
-    roads    = load_roads(bbox, osm_http_cache, road_types, cfg.extraction.network_type)
+    villages = load_villages(extractor, region, cfg)
+    shelters = load_shelters(extractor, region, cfg)
+    roads    = load_roads(region, extractor, road_types, cfg.extraction.network_type)
 
-    logger.info("Enriching roads with InaRISK risk scores …")
-    roads    = enrich_roads_with_risk(roads, disaster_type.value, batch_size, rate_limit_s, risk_cache)
-    logger.info("Enriching shelters with InaRISK risk scores …")
-    shelters = enrich_shelters_with_risk(shelters, disaster_type.value, batch_size, rate_limit_s, risk_cache)
+    skip_inarisk = bool(cfg.skip_inarisk) if hasattr(cfg, "skip_inarisk") else False
+    if skip_inarisk:
+        logger.warning("skip_inarisk=true — road and shelter risk scores set to 0.0 (InaRISK bypassed)")
+        roads["risk"]     = 0.0
+        roads["risk_cls"] = 1
+        shelters["risk"]     = 0.0
+        shelters["risk_cls"] = 1
+    else:
+        logger.info("Enriching roads with InaRISK risk scores …")
+        roads    = enrich_roads_with_risk(roads, disaster_type.value, batch_size, rate_limit_s, risk_cache)
+        logger.info("Enriching shelters with InaRISK risk scores …")
+        shelters = enrich_shelters_with_risk(shelters, disaster_type.value, batch_size, rate_limit_s, risk_cache)
 
     write_shapefiles(villages, shelters, roads, out_dir)
     write_preview(villages, shelters, roads, out_dir, center_lat, center_lon, cfg.disaster.name)

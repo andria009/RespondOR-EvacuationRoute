@@ -1,0 +1,124 @@
+# RespondOR-EvacuationRoute — Mount Merapi Eruption 2023
+# March–April 2023: Mount Merapi produced a series of pyroclastic flows and
+# hot cloud surges (awan panas guguran) reaching up to 8 km on the south-southwest
+# flank. Thousands of residents within the 7 km Kawasan Rawan Bencana (KRB) III
+# were evacuated to temporary shelters across Sleman, Magelang, Boyolali, and
+# Klaten regencies. This scenario uses a 20 km impact radius to cover the full
+# KRB and the primary evacuation belt.
+# Java has excellent OSM admin boundary coverage — admin_boundary source alone
+# should provide complete village data. Risk dominates: pyroclastic corridors
+# on the south and southwest flanks are classified maximum risk.
+
+scenario_id: "merapi_eruption_2023"
+output_dir: "output/merapi_eruption_2023"
+log_level: "INFO"
+skip_inarisk: false
+
+# ------------------------------------------------------------------ #
+# DISASTER INFORMATION
+# ------------------------------------------------------------------ #
+disaster:
+  name: "Mount Merapi Eruption 2023"
+  type: "volcano"                 # earthquake|volcano|flood|landslide
+  lat: -7.54                      # Merapi summit
+  lon: 110.44
+  severity: 0.85                  # major pyroclastic flows reaching 8 km
+
+# ------------------------------------------------------------------ #
+# REGION OF INTEREST
+# ------------------------------------------------------------------ #
+region:
+  type: "circle"
+  center: [-7.54, 110.44]
+  radius_km: 20.0                 # covers KRB I–III and primary shelter belt
+
+# ------------------------------------------------------------------ #
+# DATA EXTRACTION OPTIONS
+# ------------------------------------------------------------------ #
+extraction:
+  use_cached_osm: true
+  use_cached_inarisk: true
+  network_type: "drive"           # primary evacuation uses vehicle routes
+
+  # Evacuation routing origin points: building clusters (DBSCAN, population from building types).
+  # Admin boundaries (L8/L9) are loaded from wilayah DB in preview_villages.py for reference only.
+  village_sources: [building_clusters]
+  # village_sources: [wilayah_db, building_clusters]  # wilayah DB as primary + clusters for gaps
+  # village_sources: [admin_boundary, place_nodes, building_clusters]
+  village_pop_density: 2000.0     # densely populated Sleman/Magelang foothills
+  village_max_pop: 50000
+
+  village_fill_uncovered_l9: true   # add synthetic cluster at L9 centroid where no OSM buildings exist
+  village_cluster_eps_m: 100
+  village_cluster_min_buildings: 1
+  village_cluster_max_area_km2: 5.0
+  village_persons_per_dwelling: 2.0
+  village_building_persons:
+    house:       4.0
+    detached:    7.0
+    residential: 10.0
+    apartments:  25.0
+    farm:        7.0
+    "yes":       2.0
+    commercial:  0.0
+    mosque:      0.0
+    school:      0.0
+    hospital:    0.0
+    office:      0.0
+
+  inarisk_batch_size: 20
+  inarisk_rate_limit_s: 1.0
+
+  population_csv: null
+
+  # Merapi KRB: BPBD designated assembly points (Bak Truk, Huntap), Balai Desa,
+  # schools outside the KRB, hospitals in Sleman and Magelang
+  shelter_tags:
+    amenity:   [hospital, clinic, school, university, community_centre, place_of_worship]
+    emergency: [assembly_point, shelter]
+    building:  [school, university, civic, government, public, church, mosque]
+    leisure:   [sports_centre, stadium, pitch, park]
+    landuse:   [military]
+  shelter_min_area_m2: 200.0
+  shelter_m2_per_person: 2.0
+  shelter_capacity_csv: null
+  shelter_cluster_eps_m: 200
+  shelter_cluster_min_shelters: 1
+
+  # Merapi: roads generally good quality; reduce speed on tertiary/unclassified
+  # on steep flanks. No track access assumed — vehicle evacuation focus.
+  road_types:
+    motorway:      {speed_kmh: 100, capacity_veh_h: 2200}
+    trunk:         {speed_kmh:  80, capacity_veh_h: 2000}
+    primary:       {speed_kmh:  60, capacity_veh_h: 1800}
+    secondary:     {speed_kmh:  50, capacity_veh_h: 1500}
+    tertiary:      {speed_kmh:  35, capacity_veh_h: 1000}  # steep flank roads
+    unclassified:  {speed_kmh:  25, capacity_veh_h:  600}
+    residential:   {speed_kmh:  25, capacity_veh_h:  600}
+    service:       {speed_kmh:  15, capacity_veh_h:  300}
+    living_street: {speed_kmh:  10, capacity_veh_h:  150}
+
+# ------------------------------------------------------------------ #
+# ROUTING CONFIGURATION
+# ------------------------------------------------------------------ #
+routing:
+  max_routes_per_village: 5
+  min_routes_per_village: 3
+  max_route_risk_threshold: 0.80  # lower threshold — more route alternatives on flanks
+
+  # Volcano: risk is dominant; avoid pyroclastic flow corridors
+  weight_distance:     0.20
+  weight_risk:         0.55       # pyroclastic flow corridors are fatal
+  weight_road_quality: 0.20
+  weight_time:         0.05
+
+  bpr_alpha: 0.15
+  bpr_beta: 4.0
+  assignment_method: "greedy"   # greedy (fast) | lp (optimal)
+
+# ------------------------------------------------------------------ #
+# EXECUTION MODE
+# ------------------------------------------------------------------ #
+execution:
+  mode: "parallel"
+  n_workers: 10

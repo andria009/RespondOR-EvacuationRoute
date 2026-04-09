@@ -34,10 +34,14 @@ class HeuristicOptimizer:
     Computes candidate evacuation routes from villages to shelters.
 
     Composite score (lower = better):
-        score = w_dist × norm_dist
-              + w_risk × avg_risk
-              + w_quality × worst_quality
-              + w_time × norm_time
+        score = w_dist     × norm_dist
+              + w_risk     × avg_risk
+              + w_quality  × worst_quality
+              + w_time     × norm_time
+              + w_disaster × norm_disaster_proximity  (higher = shelter closer to disaster = worse)
+
+    Risk is NOT used as a hard filter — all road-reachable shelters are scored and ranked.
+    This ensures villages are never left without routes due to a risk threshold.
     """
 
     def __init__(
@@ -46,15 +50,17 @@ class HeuristicOptimizer:
         weight_risk: float = 0.4,
         weight_road_quality: float = 0.2,
         weight_time: float = 0.1,
-        max_routes_per_village: int = 3,
-        max_risk_threshold: float = 0.8,
+        weight_disaster_distance: float = 0.05,
+        max_routes_per_village: int = 5,
+        disaster_location: Optional[Tuple[float, float]] = None,
     ):
         self.w_dist = weight_distance
         self.w_risk = weight_risk
         self.w_quality = weight_road_quality
         self.w_time = weight_time
+        self.w_disaster = weight_disaster_distance
         self.max_routes = max_routes_per_village
-        self.max_risk = max_risk_threshold
+        self.disaster_location = disaster_location  # (lat, lon) of disaster center
 
     def compute_routes(
         self,
@@ -87,12 +93,16 @@ class HeuristicOptimizer:
         shelter_nodes = {s.nearest_node_id: s for s in shelters
                          if s.nearest_node_id is not None}
 
-        for v in villages:
+        n = len(villages)
+        log_every = max(1, n // 10)
+        for i, v in enumerate(villages):
             if v.nearest_node_id is None or v.nearest_node_id not in G:
                 logger.debug(f"Village {v.name} has no graph node, skipping")
                 continue
             routes = self._routes_for_village(G, v, shelters, shelter_nodes)
             all_routes.extend(routes)
+            if (i + 1) % log_every == 0 or (i + 1) == n:
+                logger.info(f"  Routing: {i+1}/{n} villages done ({len(all_routes)} routes so far)")
 
         logger.info(f"Computed {len(all_routes)} candidate routes for {len(villages)} villages")
         return all_routes
@@ -122,8 +132,9 @@ class HeuristicOptimizer:
             w_risk=self.w_risk,
             w_quality=self.w_quality,
             w_time=self.w_time,
+            w_disaster=self.w_disaster,
             max_routes=self.max_routes,
-            max_risk=self.max_risk,
+            disaster_location=self.disaster_location,
         )
 
         all_routes = []
@@ -157,8 +168,9 @@ class HeuristicOptimizer:
             w_risk=self.w_risk,
             w_quality=self.w_quality,
             w_time=self.w_time,
+            w_disaster=self.w_disaster,
             max_routes=self.max_routes,
-            max_risk=self.max_risk,
+            disaster_location=self.disaster_location,
         )
 
     def rank_routes(
@@ -185,6 +197,46 @@ class HeuristicOptimizer:
 # Module-level (picklable) function for multiprocessing
 # ------------------------------------------------------------------ #
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in km between two (lat, lon) points."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return R * 2 * math.asin(math.sqrt(a))
+
+
+def _score_route(
+    total_dist: float,
+    total_time: float,
+    avg_risk: float,
+    worst_quality: float,
+    shelter_dist_from_disaster_km: float,
+    max_disaster_dist_km: float,
+    w_dist: float,
+    w_risk: float,
+    w_quality: float,
+    w_time: float,
+    w_disaster: float,
+) -> float:
+    """Compute composite score (lower = better evacuation route)."""
+    norm_dist = total_dist / 50_000.0      # normalise by 50 km
+    norm_time = total_time / 7200.0        # normalise by 2 hours
+    # Disaster proximity: shelters closer to disaster get a HIGHER penalty.
+    # Normalised so max_disaster_dist → 0 penalty; 0 km → 1.0 penalty.
+    if max_disaster_dist_km > 0 and w_disaster > 0:
+        norm_disaster_prox = max(0.0, 1.0 - shelter_dist_from_disaster_km / max_disaster_dist_km)
+    else:
+        norm_disaster_prox = 0.0
+    return (
+        w_dist    * norm_dist
+        + w_risk  * avg_risk
+        + w_quality * (worst_quality / 3.0)   # max quality_weight ~3
+        + w_time  * norm_time
+        + w_disaster * norm_disaster_prox
+    )
+
+
 def _routes_for_village_standalone(
     village: Village,
     G: nx.Graph,
@@ -194,18 +246,19 @@ def _routes_for_village_standalone(
     w_risk: float,
     w_quality: float,
     w_time: float,
+    w_disaster: float,
     max_routes: int,
-    max_risk: float,
+    disaster_location: Optional[Tuple[float, float]] = None,
 ) -> List[EvacuationRoute]:
     """
     Standalone function (picklable for ProcessPoolExecutor).
-    Compute candidate routes from one village to all shelters.
+    Compute up to max_routes from one village to all reachable shelters, ranked by
+    composite score.  Risk is penalised through composite scoring — not filtered out.
+    Villages on graph components disconnected from shelters return an empty list.
     """
     src_node = village.nearest_node_id
     if src_node not in G:
         return []
-
-    candidate_routes = []
 
     # Pre-compute shortest paths from source to all reachable nodes
     try:
@@ -215,6 +268,19 @@ def _routes_for_village_standalone(
     except nx.NetworkXError:
         return []
 
+    # Pre-compute shelter distances from disaster center for penalty scoring
+    if disaster_location is not None and w_disaster > 0:
+        d_lat, d_lon = disaster_location
+        shelter_disaster_dists = {
+            s.shelter_id: _haversine_km(d_lat, d_lon, s.centroid_lat, s.centroid_lon)
+            for s in shelters
+        }
+        max_disaster_dist_km = max(shelter_disaster_dists.values()) if shelter_disaster_dists else 1.0
+    else:
+        shelter_disaster_dists = {}
+        max_disaster_dist_km = 1.0
+
+    candidate_routes = []
     for shelter in shelters:
         tgt_node = shelter.nearest_node_id
         if tgt_node is None or tgt_node not in G:
@@ -226,7 +292,6 @@ def _routes_for_village_standalone(
         if len(path) < 2:
             continue
 
-        # Gather edge metrics along path
         total_dist = 0.0
         total_time = 0.0
         risk_scores = []
@@ -243,22 +308,14 @@ def _routes_for_village_standalone(
         max_risk_on_path = max(risk_scores) if risk_scores else 0.0
         worst_quality = max(quality_scores) if quality_scores else 1.0
 
-        # Skip routes with excessively high risk
-        if max_risk_on_path > max_risk:
-            continue
-
-        # Normalize: these are rough normalizations; calibrate for real scenarios
-        norm_dist = total_dist / 50_000.0  # normalize by 50 km
-        norm_time = total_time / 7200.0    # normalize by 2 hours
-
-        composite = (
-            w_dist * norm_dist
-            + w_risk * avg_risk
-            + w_quality * (worst_quality / 3.0)   # max quality_weight ~3
-            + w_time * norm_time
+        shelter_dist_km = shelter_disaster_dists.get(shelter.shelter_id, 0.0)
+        composite = _score_route(
+            total_dist, total_time, avg_risk, worst_quality,
+            shelter_dist_km, max_disaster_dist_km,
+            w_dist, w_risk, w_quality, w_time, w_disaster,
         )
 
-        route = EvacuationRoute(
+        candidate_routes.append(EvacuationRoute(
             route_id=f"{village.village_id}_to_{shelter.shelter_id}",
             village_id=village.village_id,
             shelter_id=shelter.shelter_id,
@@ -269,9 +326,10 @@ def _routes_for_village_standalone(
             max_risk_score=max_risk_on_path,
             worst_road_quality=worst_quality,
             composite_score=composite,
-        )
-        candidate_routes.append(route)
+        ))
 
-    # Sort by composite score, return top-K
+    # Sort by composite score (lower = better); return up to max_routes
+    # min_routes is a soft guarantee — if fewer shelters are reachable via road network,
+    # we return all we found (can't create routes to unreachable components).
     candidate_routes.sort(key=lambda r: r.composite_score)
     return candidate_routes[:max_routes]

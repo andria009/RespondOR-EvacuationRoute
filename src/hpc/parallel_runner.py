@@ -32,6 +32,25 @@ from src.routing.assignment import PopulationAssigner
 logger = logging.getLogger(__name__)
 
 
+def _resolve_hazard_layers(cfg, disaster) -> dict:
+    """
+    Return {DisasterType: weight} for risk enrichment.
+    Uses cfg.routing.hazard_layers when configured; falls back to
+    {disaster.disaster_type: 1.0} for single-layer scenarios.
+    """
+    raw = cfg.routing.hazard_layers  # {str: float}
+    if raw:
+        resolved = {}
+        for name, weight in raw.items():
+            try:
+                resolved[DisasterType(name)] = float(weight)
+            except ValueError:
+                logger.warning(f"Unknown hazard layer '{name}' in hazard_layers — skipping")
+        if resolved:
+            return resolved
+    return {disaster.disaster_type: 1.0}
+
+
 class ParallelRunner:
     """
     Parallel execution using multiprocessing on a single machine.
@@ -80,6 +99,20 @@ class ParallelRunner:
         builder = EvacuationGraphBuilder()
         G = builder.build(nodes, edges, disaster_type=disaster.disaster_type)
         builder.attach_pois_to_graph(villages, shelters)
+        if not cfg.skip_inarisk:
+            hazard_layers = _resolve_hazard_layers(cfg, disaster)
+            inarisk = InaRISKClient(
+                batch_size=cfg.extraction.inarisk_batch_size,
+                rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
+            )
+            builder.apply_inarisk_to_edges(
+                inarisk=inarisk,
+                hazard_layers=hazard_layers,
+                aggregation=cfg.routing.hazard_aggregation,
+                cache_path=Path(cfg.extraction.inarisk_cache_dir) / "road_risk_cache.json",
+                use_cache=cfg.extraction.use_cached_inarisk,
+            )
+        builder.propagate_poi_risk_to_graph(villages, shelters)
         timings["graph_build"] = time.perf_counter() - t0
 
         # ---- Optional: limit villages for benchmarking ----
@@ -95,8 +128,9 @@ class ParallelRunner:
             weight_risk=cfg.routing.weight_risk,
             weight_road_quality=cfg.routing.weight_road_quality,
             weight_time=cfg.routing.weight_time,
+            weight_disaster_distance=cfg.routing.weight_disaster_distance,
             max_routes_per_village=cfg.routing.max_routes_per_village,
-            max_risk_threshold=cfg.routing.max_route_risk_threshold,
+            disaster_location=(cfg.disaster.lat, cfg.disaster.lon),
         )
         routes = optimizer.compute_routes(
             G, villages, shelters,
@@ -109,7 +143,7 @@ class ParallelRunner:
 
         # ---- Stage 5: Assignment ----
         t0 = time.perf_counter()
-        assigner = PopulationAssigner(method="greedy")
+        assigner = PopulationAssigner(method=cfg.routing.assignment_method)
         result = assigner.assign(
             villages, shelters, routes_by_village,
             scenario_id=cfg.scenario_id,
@@ -124,7 +158,7 @@ class ParallelRunner:
                     f"Evacuated: {result.total_evacuated}/{result.total_population} ===")
 
         self._save_timings(timings)
-        return result, villages, shelters, routes_by_village, timings
+        return result, villages, shelters, routes_by_village, timings, G
 
     # ------------------------------------------------------------------ #
     # Parallel extraction: run OSM queries for roads, villages, shelters
@@ -168,8 +202,10 @@ class ParallelRunner:
                         cfg.extraction.village_place_radius_m,
                         cfg.extraction.village_cluster_eps_m,
                         cfg.extraction.village_cluster_min_buildings,
+                        cfg.extraction.village_cluster_max_area_km2,
                         cfg.extraction.village_persons_per_dwelling,
                         cfg.extraction.village_building_persons,
+                        cfg.extraction.village_fill_uncovered_l9,
                     )
 
                 # Shelters
@@ -183,6 +219,8 @@ class ParallelRunner:
                         cfg.extraction.shelter_min_area_m2,
                         cfg.extraction.shelter_m2_per_person,
                         cfg.extraction.use_cached_osm,
+                        cfg.extraction.shelter_cluster_eps_m,
+                        cfg.extraction.shelter_cluster_min_shelters,
                     )
 
                 nodes, edges = net_future.result()
@@ -191,7 +229,7 @@ class ParallelRunner:
 
         pop_loader = PopulationLoader()
         pop_loader.apply_population(villages, cfg.extraction.population_csv,
-                                    cfg.extraction.default_pop_density)
+                                    cfg.extraction.village_pop_density)
         cap_loader = ShelterCapacityLoader()
         cap_loader.apply_capacity(shelters, cfg.extraction.shelter_capacity_csv,
                                   cfg.extraction.m2_per_person)
@@ -202,16 +240,33 @@ class ParallelRunner:
     # ------------------------------------------------------------------ #
 
     def _apply_risk_parallel(self, villages, shelters, disaster, cfg):
+        if cfg.skip_inarisk:
+            logger.warning("skip_inarisk=true — all risk scores set to 0.0 (InaRISK bypassed)")
+            for v in villages:
+                v.risk_scores["composite"] = 0.0
+            for s in shelters:
+                s.risk_scores["composite"] = 0.0
+            return
+
         inarisk = InaRISKClient(
             batch_size=cfg.extraction.inarisk_batch_size,
             rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
         )
-
-        with ThreadPoolExecutor(max_workers=2) as tpe:
-            vf = tpe.submit(inarisk.enrich_villages_with_risk, villages, disaster.disaster_type)
-            sf = tpe.submit(inarisk.enrich_shelters_with_risk, shelters, disaster.disaster_type)
-            vf.result()
-            sf.result()
+        hazard_layers = _resolve_hazard_layers(cfg, disaster)
+        # Sequential for cache safety — villages write cache, then shelters read+extend it
+        cache_path = Path(cfg.extraction.inarisk_cache_dir) / "poi_risk_cache.json"
+        grid_cache_path = Path(cfg.extraction.inarisk_cache_dir) / "road_risk_cache.json"
+        use_cache = cfg.extraction.use_cached_inarisk
+        if len(hazard_layers) > 1:
+            logger.info(
+                f"Compound hazard: {', '.join(f'{dt.value}×{w}' for dt, w in hazard_layers.items())}"
+                f" [{cfg.routing.hazard_aggregation}]"
+            )
+            inarisk.enrich_villages_compound(villages, hazard_layers, cfg.routing.hazard_aggregation, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
+            inarisk.enrich_shelters_compound(shelters, hazard_layers, cfg.routing.hazard_aggregation, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
+        else:
+            inarisk.enrich_villages_with_risk(villages, disaster.disaster_type, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
+            inarisk.enrich_shelters_with_risk(shelters, disaster.disaster_type, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
 
     def _save_timings(self, timings: dict):
         import json

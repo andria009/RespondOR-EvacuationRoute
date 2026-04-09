@@ -43,6 +43,9 @@ pytest>=9.0.0
 pytest-cov>=7.1.0
 coverage>=7.13.0
 
+# ---- Database (wilayah PostGIS) ----
+psycopg2-binary>=2.9.10    # PostgreSQL adapter for WilayahLoader + import script
+
 # ---- Optional: HPC/MPI ----
 # Requires an MPI runtime (e.g. OpenMPI or Intel MPI) installed on the system.
 # macOS:  brew install open-mpi && pip install mpi4py
