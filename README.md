@@ -2,20 +2,20 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Research-grade disaster evacuation route optimization system for Indonesia. Integrates OpenStreetMap road networks, InaRISK BNPB hazard data, and multi-objective routing to maximize the number of people evacuated to safe shelters. Designed for four disaster types — flood, landslide, earthquake, and volcano — with validated scenarios drawn from major 2024 Indonesian disaster events.
+Research-grade disaster evacuation route optimization system for Indonesia. Integrates OpenStreetMap road networks, InaRISK BNPB hazard data, and multi-objective routing to maximize the number of people evacuated to safe shelters across multiple disaster types and compound hazard scenarios.
 
 ---
 
 ## Overview
 
-Given a disaster event, the system:
+Given a disaster event configuration, the system:
 
-1. **Extracts** road network, villages, and shelters from OpenStreetMap using configurable multi-source village extraction (admin boundaries, place nodes, building clusters)
-2. **Scores hazard risk** via the InaRISK BNPB API for each village, shelter, and road segment
-3. **Builds** a weighted evacuation graph with composite edge weights (distance × road quality × risk penalty)
-4. **Computes** optimized routes from each village to candidate shelters using Dijkstra's algorithm
-5. **Assigns** village populations to shelters using greedy optimization, maximizing total evacuated population subject to shelter capacity constraints
-6. **Exports** results as interactive HTML maps, SHP files (for GIS / GAMA Platform), and CSV for analysis
+1. **Extracts** road network, settlement clusters, and shelters from OpenStreetMap — using configurable multi-source village extraction (admin boundaries, place nodes, DBSCAN building clusters) and optional wilayah DB for official kelurahan/desa boundaries
+2. **Scores hazard risk** via the InaRISK BNPB API for each village, shelter, and road segment — with grid-snap caching that eliminates redundant API calls on subsequent runs
+3. **Builds** a weighted evacuation graph with composite edge weights (distance × road quality × risk penalty); supports compound hazard scenarios (multiple weighted InaRISK layers)
+4. **Computes** optimized evacuation routes from each village to all reachable shelters using Dijkstra's algorithm, scored by a composite metric that penalises distance, risk, road quality, travel time, and proximity to the disaster centre
+5. **Assigns** village populations to shelters using greedy optimisation (or optional LP), maximising total evacuated population subject to shelter capacity constraints
+6. **Exports** results as interactive HTML maps, route CSVs, graph statistics, SHP files (for QGIS / GAMA Platform), and GAMA ABM simulation inputs
 
 ---
 
@@ -23,88 +23,126 @@ Given a disaster event, the system:
 
 ```
 RespondOR-EvacuationRoute/
-├── configs/
-│   ├── demak_flood_2024.yaml           # Demak Regency flood, Feb 2024
-│   ├── sukabumi_landslide_2024.yaml    # Cisolok landslide, Dec 2024
-│   ├── tuban_earthquake_2024.yaml      # Tuban M6.0 earthquake, Mar 2024
-│   └── lewotobi_eruption_2024.yaml     # Lewotobi Laki-Laki eruption, Nov 2024
+├── configs/                            # One YAML per scenario
+│   ├── banjarnegara_landslide_2021.yaml
+│   ├── cianjur_earthquake_2022.yaml
+│   ├── demak_flood_2024.yaml
+│   ├── lewotobi_eruption_2024.yaml
+│   ├── merapi_eruption_2023.yaml
+│   ├── palu_earthquake_2018.yaml
+│   ├── sinabung_eruption_2016.yaml
+│   ├── sumedang_landslide_2021.yaml
+│   ├── sukabumi_landslide_2024.yaml
+│   └── tuban_earthquake_2024.yaml
 ├── data/
-│   └── raw/osm_cache/                  # Cached OSM extracts (auto-populated per scenario)
+│   └── raw/
+│       ├── osm_cache/                  # OSM network + village + shelter cache (bbox-keyed)
+│       └── inarisk_cache/              # InaRISK POI + road + hazard grid cache
+├── docker/
+│   ├── import_wilayah.py               # Populate wilayah PostGIS DB from shapefiles
+│   └── init/                           # DB initialisation SQL
+├── docker-compose.yml                  # PostGIS wilayah DB (for L9 kelurahan boundaries)
 ├── experiments/
-│   ├── export_shp.py                   # Export villages/shelters/roads as SHP + preview map
+│   ├── prerun_validation.py            # Pre-run check: config, cache, API budget, time estimate
+│   ├── preview_region.py               # Preview OSM extraction region (villages, roads, admin)
+│   ├── preview_hazard.py               # Preview InaRISK hazard grid for a scenario
+│   ├── export_shp.py                   # Export villages/shelters/roads as SHP + GeoJSON
 │   ├── prepare_gama_inputs.py          # Write GAMA simulation inputs (CSV + SHP + JSON)
 │   ├── build_legacy_input.py           # Build preloaded/legacy input files from OSM cache
-│   ├── compare_routes.py               # Compare OSM vs legacy route outputs
-│   └── scenarios/                      # Per-scenario experiment notebooks/scripts
-├── hpc/
-│   └── slurm_job.sh                    # SLURM job script (4 nodes × 8 MPI ranks)
+│   └── compare_routes.py              # Compare route outputs across scenarios
+├── misc/
+│   └── EvacuationModel.gaml            # GAMA agent-based evacuation model
 ├── output/                             # Pipeline outputs (auto-generated, per scenario)
-│   ├── demak_flood_2024/
-│   ├── sukabumi_landslide_2024/
-│   ├── tuban_earthquake_2024/
-│   └── lewotobi_eruption_2024/
-├── simulation/
-│   └── models/EvacuationModel.gaml     # GAMA agent-based evacuation model
+│   └── <scenario_id>/
 ├── src/
-│   ├── config/config_loader.py         # YAML config loader + dataclasses
+│   ├── config/config_loader.py         # YAML config loader + AppConfig dataclasses
 │   ├── data/
-│   │   ├── inarisk_client.py           # InaRISK BNPB API client (with caching)
-│   │   ├── models.py                   # Core dataclasses (Node, Edge, Village, Shelter, Route)
-│   │   ├── osm_extractor.py            # OSM extraction (osmnx 2.x) + multi-source village extraction
-│   │   └── population_loader.py        # Population and shelter capacity estimation
-│   ├── graph/graph_builder.py          # Weighted NetworkX evacuation graph
+│   │   ├── inarisk_client.py           # InaRISK BNPB API client (grid-snap + batched cache)
+│   │   ├── models.py                   # Core dataclasses (Village, Shelter, Route, ...)
+│   │   ├── osm_extractor.py            # OSM extraction + multi-source villages + circular shelters
+│   │   ├── population_loader.py        # Population and shelter capacity estimation
+│   │   └── wilayah_loader.py           # PostGIS wilayah DB loader (L8/L9 admin boundaries)
+│   ├── graph/graph_builder.py          # Weighted NetworkX evacuation graph + InaRISK enrichment
 │   ├── hpc/
-│   │   ├── distributed_runner.py       # MPI runner (mpi4py; fallback: ProcessPool)
-│   │   ├── naive_runner.py             # Sequential pipeline
-│   │   └── parallel_runner.py          # ThreadPool (I/O) + ProcessPool (routing)
+│   │   ├── naive_runner.py             # Sequential single-process pipeline
+│   │   ├── parallel_runner.py          # ThreadPool (I/O) + ProcessPool (routing)
+│   │   └── distributed_runner.py       # MPI runner (mpi4py; fallback: ProcessPool)
 │   ├── routing/
-│   │   ├── assignment.py               # Greedy population-to-shelter assignment
-│   │   └── heuristic_optimizer.py      # Dijkstra-based route computation and scoring
+│   │   ├── heuristic_optimizer.py      # Dijkstra-based route computation and scoring
+│   │   └── assignment.py               # Greedy / LP population-to-shelter assignment
+│   ├── utils/
+│   │   └── logging_setup.py            # File + console logging to logs/
 │   ├── visualization/visualizer.py     # Folium interactive map + matplotlib charts
 │   └── main.py                         # CLI entry point
-└── tests/                              # pytest test suite
+└── tests/
 ```
 
 ---
 
 ## Scenarios
 
-Four scenarios based on major 2024 Indonesian disaster events:
-
 | Scenario | Config | Disaster | Center | Radius |
 |---|---|---|---|---|
-| Demak Flood | `demak_flood_2024.yaml` | Flood, Feb 2024 | -6.894, 110.633 | 25 km |
-| Sukabumi Landslide | `sukabumi_landslide_2024.yaml` | Landslide, Dec 2024 | -7.123, 106.727 | 18 km |
-| Tuban Earthquake | `tuban_earthquake_2024.yaml` | M6.0 Earthquake, Mar 2024 | -6.538, 112.045 | 30 km |
-| Lewotobi Eruption | `lewotobi_eruption_2024.yaml` | Volcano, Nov 2024 | -8.503, 122.775 | 15 km |
-
-> Scenarios are under active development. Extraction parameters, shelter tags, and routing weights are calibrated per event. See individual config files for full settings.
+| Banjarnegara Landslide | `banjarnegara_landslide_2021.yaml` | Landslide, Feb 2021 | -7.37, 109.68 | 10 km |
+| Sukabumi Landslide | `sukabumi_landslide_2024.yaml` | Landslide, Dec 2024 | -7.12, 106.73 | 18 km |
+| Sumedang Landslide | `sumedang_landslide_2021.yaml` | Landslide, Jan 2021 | -6.85, 107.92 | 10 km |
+| Cianjur Earthquake | `cianjur_earthquake_2022.yaml` | Earthquake, Nov 2022 | -6.86, 107.05 | 20 km |
+| Merapi Eruption | `merapi_eruption_2023.yaml` | Volcano, 2023 | -7.54, 110.44 | 15 km |
+| Sinabung Eruption | `sinabung_eruption_2016.yaml` | Volcano, 2016 | 3.17, 98.39 | 15 km |
+| Palu Earthquake | `palu_earthquake_2018.yaml` | Compound (earthquake + tsunami + liquefaction), Sep 2018 | -0.90, 119.87 | 20 km |
+| Demak Flood | `demak_flood_2024.yaml` | Flood, Feb 2024 | -6.89, 110.63 | 25 km |
+| Tuban Earthquake | `tuban_earthquake_2024.yaml` | Earthquake, Mar 2024 | -6.54, 112.05 | 20 km |
+| Lewotobi Eruption | `lewotobi_eruption_2024.yaml` | Volcano, Nov 2024 | -8.50, 122.78 | 15 km |
 
 ---
 
 ## Algorithm
 
-### Edge Weight (composite)
+The routing pipeline has two stages: **path finding** (Dijkstra on edge weights) and **path ranking** (composite score). They are complementary — Dijkstra finds the best road path to each shelter, the composite score picks the best shelter.
+
+### Stage 1 — Path Finding: Edge Weight (Dijkstra)
+
+For each village, a single-source Dijkstra traversal finds the least-cost road path to every reachable shelter. The edge weight used by Dijkstra is:
 
 ```
-w(e) = distance(e) × quality_weight(e) × (1 + risk_weight × risk_score(e))
+weight(e) = length_m(e) × quality_weight(e) × (1.0 + risk_weight × risk_score(e))
 ```
 
-- `quality_weight`: road type factor (motorway=0.5 → footway=2.5)
-- `risk_score`: InaRISK hazard index normalized to [0, 1]
-- Edges with `risk_score > max_route_risk_threshold` are pruned as impassable
+- `length_m` — physical length of the road segment
+- `quality_weight` — road type factor; faster roads get lower weight (motorway → 0.5, tertiary → 1.5, footway → 2.5), so Dijkstra prefers higher-quality roads even at equal distance
+- `risk_score` — InaRISK composite hazard index [0, 1]; multiplied in as a penalty so Dijkstra naturally avoids high-risk segments while never making them impassable — all road-connected shelters remain reachable
 
-### Route Composite Score (lower = better)
+The result is the geometrically optimal path (following the actual road network) from the village to each shelter.
+
+### Stage 2 — Path Ranking: Composite Route Score (lower = better)
+
+Once paths are found, each village-to-shelter route is scored to allow comparison across different shelters and to drive population assignment:
 
 ```
-score = w_dist × (dist/50km) + w_risk × avg_risk + w_quality × (worst_quality/3) + w_time × (time/2h)
+score = w_dist     × (total_distance / 50 km)
+      + w_risk     × avg_edge_risk
+      + w_quality  × (worst_edge_quality / 3)
+      + w_time     × (total_travel_time / 2 h)
+      + w_disaster × (1 − shelter_dist_from_disaster / max_shelter_dist)
 ```
 
-Default weights: `w_dist=0.30, w_risk=0.40, w_quality=0.20, w_time=0.10` (scenario-tunable)
+The five weights are set per scenario in the YAML config under `routing:`:
 
-### Population Assignment
+| Weight | Config field | What it controls |
+|---|---|---|
+| `w_dist` | `weight_distance` | Penalises longer routes (normalised by 50 km) |
+| `w_risk` | `weight_risk` | Penalises higher average InaRISK hazard score along the path |
+| `w_quality` | `weight_road_quality` | Penalises poor road surface (normalised by worst quality factor of 3) |
+| `w_time` | `weight_time` | Penalises longer travel time (normalised by 2 hours) |
+| `w_disaster` | `weight_disaster_distance` | Penalises shelters close to the disaster centre — routes moving away from the hazard zone are preferred |
 
-Greedy algorithm: sort all (village, shelter, route) candidates by composite score, assign greedily while tracking remaining shelter capacity and unmet village demand.
+Weights do not need to sum to 1. Default values: `w_dist=0.25, w_risk=0.30, w_quality=0.20, w_time=0.10, w_disaster=0.15`.
+
+Routes are ranked per village by composite score (ascending). The top-ranked route is the primary evacuation route; the next `min_routes_per_village − 1` are alternatives.
+
+### Stage 3 — Population Assignment
+
+Greedy algorithm: sort all (village, shelter, route) candidates by composite score, assign greedily while respecting remaining shelter capacity. Optional LP solver (`assignment_method: lp`) via SciPy HiGHS.
 
 ---
 
@@ -113,7 +151,8 @@ Greedy algorithm: sort all (village, shelter, route) candidates by composite sco
 ### Requirements
 
 - Python 3.14 (via pyenv)
-- GAMA Platform 2025.6.4 (for simulation, optional)
+- Docker (for wilayah PostGIS DB — optional but recommended)
+- GAMA Platform 2025+ (for simulation, optional)
 - OpenMPI or Intel MPI (for HPC mode, optional)
 
 ### Installation
@@ -128,61 +167,76 @@ pip install -r requirements.txt
 # Linux:  module load openmpi/4.1 && pip install mpi4py
 ```
 
+### Wilayah DB (optional, for L9/L8 admin context in tooltips)
+
+The wilayah PostGIS database provides official Indonesian kelurahan/desa (L9) and kecamatan (L8) boundaries. Used to:
+- Assign structured names (`C_33.10.03.2001_2`, `S_33.10.03.2001_1`) to building clusters
+- Show L9/L8 breadcrumbs in map tooltips
+- Fill uncovered L9 with synthetic clusters (`village_fill_uncovered_l9: true`)
+
+```bash
+docker compose up -d
+python docker/import_wilayah.py   # populate DB from shapefile data
+```
+
 ---
 
 ## Usage
 
-### Run a scenario pipeline
+### Pre-run validation
 
 ```bash
-# Sequential (default)
-python -m src.main --config configs/demak_flood_2024.yaml
+python -m experiments.prerun_validation --config configs/banjarnegara_landslide_2021.yaml
+```
 
-# Parallel (multiprocessing, single node)
-python -m src.main --config configs/demak_flood_2024.yaml --mode parallel --workers 8
+Checks config validity, OSM/InaRISK cache coverage, estimates village count, API budget, and expected routing time before committing to a full run.
+
+### Run a scenario
+
+```bash
+# Parallel (default)
+python -m src.main --config configs/banjarnegara_landslide_2021.yaml
+
+# Override workers
+python -m src.main --config configs/merapi_eruption_2023.yaml --mode parallel --workers 12
 
 # HPC/MPI (multi-node)
-mpirun -n 8 python -m src.main --config configs/demak_flood_2024.yaml --mode hpc
+srun --mpi=pmix -n 32 python -m src.main --config configs/palu_earthquake_2018.yaml --mode hpc
 ```
 
-### Export shapefiles and preview map
+### Preview region and hazard before running
 
 ```bash
-python -m experiments.export_shp --config configs/demak_flood_2024.yaml
+# OSM extraction preview — shows admin boundaries, building clusters, shelters, roads
+python -m experiments.preview_region --config configs/banjarnegara_landslide_2021.yaml
+
+# InaRISK hazard grid preview
+python -m experiments.preview_hazard --config configs/banjarnegara_landslide_2021.yaml
 ```
 
-Outputs to `output/<scenario_id>/gama_shp/`:
-- `villages.shp` — village polygons with population quintile class
-- `shelters.shp` — shelter polygons with capacity quintile class and InaRISK risk score
-- `roads.shp` — road network with speed, capacity, highway type, and InaRISK risk score
-- `preview.html` — interactive map matching the pipeline visualization style
+### Export shapefiles
+
+```bash
+python -m experiments.export_shp --config configs/banjarnegara_landslide_2021.yaml
+```
+
+Outputs to `output/<scenario_id>/gis/`: `villages.shp`, `shelters.shp`, `roads.shp`, `villages.geojson`, `shelters.geojson`.
 
 ### Prepare GAMA simulation inputs
 
 ```bash
-python -m experiments.prepare_gama_inputs --config configs/demak_flood_2024.yaml
+python -m experiments.prepare_gama_inputs --config configs/banjarnegara_landslide_2021.yaml
 ```
 
-Outputs to `output/<scenario_id>/gama_inputs/`:
-- `villages.csv` — village agents with population, risk, and source
-- `shelters.csv` — shelter agents with capacity and assigned load
-- `routes.csv` — assigned routes with waypoints as WKT LINESTRING
-- `scenario.json` — disaster parameters and simulation hints
-- `roads.shp` — road network for GAMA road-following movement
+Outputs to `output/<scenario_id>/gama_inputs/`: `villages.csv`, `shelters.csv`, `routes.csv`, `scenario.json`, `roads.shp`.
 
 ### Build preloaded / legacy input files
 
 ```bash
-python -m experiments.build_legacy_input --config configs/demak_flood_2024.yaml
+python -m experiments.build_legacy_input --config configs/banjarnegara_landslide_2021.yaml
 ```
 
-Outputs to `output/<scenario_id>/legacy_input/` — network JSON, PYCGR, village/shelter GeoJSON, POI CSV, and a `scenario_preloaded.yaml` that skips all extraction on re-run.
-
-### Compare OSM vs legacy routes
-
-```bash
-python -m experiments.compare_routes --config configs/demak_flood_2024.yaml
-```
+Generates a `scenario_preloaded.yaml` that skips all OSM + InaRISK extraction on re-runs.
 
 ---
 
@@ -192,61 +246,98 @@ All outputs written to `output/<scenario_id>/`:
 
 | File | Description |
 |---|---|
-| `evacuation_map.html` | Interactive Folium map — village/shelter polygons by quintile, actual road-path routes, risk heatmap toggle |
+| `evacuation_map.html` | Interactive Folium map — village/shelter polygons, road-following routes, hazard grid, LayerControl with Primary/Alternative routes, per-shelter filter panel |
 | `evacuation_results.csv` | Per-village assignment: shelter, population, distance, travel time, risk |
-| `optimization_summary.json` | Aggregate metrics: evacuation ratio, avg risk, runtime, shelter utilization |
-| `timings_naive.json` | Stage-by-stage runtime breakdown |
-| `evacuation_summary.png` | Population and evacuation bar chart |
-| `gama_shp/` | SHP export + preview map (run `export_shp`) |
-| `gama_inputs/` | GAMA simulation inputs (run `prepare_gama_inputs`) |
-| `legacy_input/` | Preloaded input files (run `build_legacy_input`) |
+| `optimization_summary.json` | Aggregate KPIs: evacuation ratio, avg risk, avg distance, avg time, runtime, shelter utilisation |
+| `routes.csv` | All candidate routes ranked per village (village × shelter × rank) |
+| `routes_summary.json` | Same as routes.csv in JSON |
+| `graph_stats.json` | Edge count, risk distribution histogram (zero / very_low / … / very_high) |
+| `evacuation_summary.png` | Coverage pie chart + shelter utilisation bar chart |
+| `timings_naive.json` | Stage-by-stage runtime (naive mode) |
+| `timings_parallel_Nw.json` | Stage-by-stage runtime (parallel mode, N workers) |
+
+---
+
+## Interactive Map (`evacuation_map.html`)
+
+The map includes a persistent LayerControl (always expanded) with independent toggles for:
+
+- **Building Clusters** — real DBSCAN settlement polygons, coloured by population quintile
+- **Synthetic Clusters** — L9 kelurahan with no OSM buildings (centroid circles)
+- **Shelters** — equivalent-area circles coloured by capacity quintile
+- **Primary Routes** — rank-1 routes (one per village), green
+- **Alternative Routes** — rank 2–3 routes, orange / red
+- **Hazard Grid** — InaRISK rectangles (~1 km grid, 5-colour ramp, off by default)
+- **Risk Heatmap** — village risk heatmap layer (off by default)
+
+A **Shelter Filter Panel** (bottom-right, minimisable) provides per-shelter checkboxes that simultaneously hide/show:
+1. That shelter's polygon on the map
+2. All primary and alternative routes leading to that shelter
+
+The panel is composable with the LayerControl — filtering a shelter via the panel and then toggling "Primary Routes" off/on via the LayerControl behaves correctly.
+
+Tooltips show:
+- **Villages**: `C_/S_[L9-kode]_N` display name, kelurahan / kecamatan breadcrumb, area (m²), population, risk
+- **Shelters**: name, type, kelurahan / kecamatan breadcrumb, area (m²), capacity, risk
+- **Routes**: rank label, village → shelter, distance, travel time, avg risk, composite score
+
+---
+
+## InaRISK API and Caching
+
+Hazard data is sourced from BNPB's [InaRISK](https://inarisk.bnpb.go.id) service via the ImageServer identify endpoint.
+
+**Supported hazard layers:**
+
+| Layer | InaRISK service |
+|---|---|
+| `volcano` | INDEKS_BAHAYA_GUNUNGAPI |
+| `landslide` | INDEKS_BAHAYA_TANAHLONGSOR |
+| `flood` | INDEKS_BAHAYA_BANJIR |
+| `tsunami` | INDEKS_BAHAYA_TSUNAMI |
+| `liquefaction` | INDEKS_BAHAYA_LIKUEFAKSI |
+| `flash_flood` | INDEKS_BAHAYA_BANJIRBANDANG |
+| `earthquake` | INDEKS_BAHAYA_GEMPABUMI (currently down) |
+
+**Compound hazard** scenarios (e.g. Palu) configure multiple layers with weights:
+
+```yaml
+routing:
+  hazard_layers:
+    earthquake:   0.5
+    tsunami:      0.3
+    liquefaction: 0.2
+  hazard_aggregation: weighted_sum   # or max
+```
+
+**Grid-snap caching** eliminates most API calls on subsequent runs. Road edges are enriched at ~1.1 km grid precision; village/shelter POI points snap to the same grid before any API call is attempted. On Banjarnegara (1 159 villages), this reduces 1 159 API calls to ~16 after the first run.
+
+Cache files:
+
+| File | Contents |
+|---|---|
+| `data/raw/inarisk_cache/road_risk_cache.json` | `{layer_key: {"lat2,lon2": score}}` — edge grid |
+| `data/raw/inarisk_cache/poi_risk_cache.json` | `{cache_key: {"lat6,lon6": score}}` — village/shelter POI |
+| `data/raw/inarisk_cache/hazard_grid_cache.json` | `{hazard_type: {"lat6,lon6": score}}` — preview grid |
+
+Use `skip_inarisk: true` in config for fully offline testing (all risk scores set to 0.0).
 
 ---
 
 ## Village Extraction Sources
 
-Villages can be extracted from three OSM sources, composable in any order. Each source adds only settlements not already covered by a polygon from a previous source.
+Villages can be extracted from multiple OSM sources, composable in any order:
 
 | Source | What it uses | Best for |
 |---|---|---|
-| `admin_boundary` | `boundary=administrative` closed polygons | Java, Sumatra — well-mapped admin data |
+| `admin_boundary` | `boundary=administrative` closed polygons at configured admin levels | Java, Sumatra — well-mapped admin data |
 | `place_nodes` | `place=village\|hamlet\|...` point nodes → synthetic circles | Remote islands, highlands with sparse admin data |
 | `building_clusters` | DBSCAN-grouped building footprints → convex hull polygons | Dense areas with good building traces but no boundaries |
+| `wilayah_db` | Official L9 kelurahan polygons from PostGIS DB | Complete coverage with structured naming |
 
-Configure in YAML under `extraction`:
+**Synthetic clusters** (`village_fill_uncovered_l9: true`): when a kelurahan has no OSM building data, a single synthetic circular cluster is placed at the kelurahan centroid, named `S_[L9-kode]_1`.
 
-```yaml
-extraction:
-  # Source order matters — each fills gaps left by previous sources
-  village_sources: [admin_boundary, place_nodes, building_clusters]
-
-  # admin_boundary: OSM admin levels to try in order
-  village_admin_levels: [9, 8, 7]   # 9=desa, 8=kecamatan, 7=kabupaten
-
-  # place_nodes: per-tag radius and population density
-  village_place_tags: [village, hamlet, town, suburb, quarter]
-  village_place_settings:
-    hamlet:  {radius_m: 300,  pop_density: 600}
-    village: {radius_m: 800,  pop_density: 1200}
-    town:    {radius_m: 2000, pop_density: 3000}
-    suburb:  {radius_m: 1200, pop_density: 4000}
-    quarter: {radius_m: 600,  pop_density: 3500}
-
-  # building_clusters: DBSCAN parameters
-  village_cluster_eps_m: 300           # cluster radius (metres)
-  village_cluster_min_buildings: 10    # minimum buildings per cluster
-  village_persons_per_dwelling: 4.0    # fallback occupancy
-
-  # Per-OSM-building-type occupancy (persons); absent types use persons_per_dwelling
-  # Set to 0.0 to exclude non-residential buildings from population counting
-  village_building_persons:
-    house: 4.5
-    apartments: 20.0
-    farm: 5.5
-    commercial: 0.0
-    mosque: 0.0
-    # ... (full default table in config_loader.py)
-```
+**Shelter clustering**: nearby shelter polygons are merged into a single circular destination (`shelter_cluster_eps_m` diameter). All shelter geometries are stored as equivalent-area circles (in UTM, reprojected to WGS84) regardless of original OSM shape.
 
 ---
 
@@ -256,105 +347,64 @@ Full annotated examples: [configs/](configs/)
 
 ### Key fields
 
-| Field | Values | Description |
+| Field | Default | Description |
 |---|---|---|
-| `disaster.type` | `volcano` `earthquake` `flood` `landslide` | Selects InaRISK hazard layer |
-| `region.type` | `circle` `bbox` | Region shape |
-| `region.radius_km` | float | Radius for circle region |
-| `extraction.use_cached_osm` | `true` `false` | Skip OSM HTTP download if cache exists |
-| `extraction.village_sources` | list | Ordered village extraction sources |
-| `extraction.village_admin_levels` | list | OSM admin levels to try (e.g. `[9, 8, 7]`) |
-| `extraction.village_place_settings` | dict | Per-place-tag `radius_m` and `pop_density` |
-| `extraction.village_building_persons` | dict | Per-building-type occupancy count |
-| `extraction.shelter_tags` | dict | OSM tags to query for shelters |
-| `extraction.shelter_min_area_m2` | float | Minimum polygon area for shelter inclusion |
-| `routing.weight_risk` | `0.0–1.0` | Weight of hazard penalty in composite score |
-| `routing.weight_distance` | `0.0–1.0` | Weight of distance in composite score |
-| `routing.weight_road_quality` | `0.0–1.0` | Weight of road quality in composite score |
-| `routing.max_route_risk_threshold` | `0.0–1.0` | Discard routes with max risk above this |
-| `execution.mode` | `naive` `parallel` `hpc` | Execution mode |
-| `execution.n_workers` | integer | Worker count for parallel mode |
-| `preloaded_network_json` | file path | Skip extraction — use pre-extracted network JSON |
-| `preloaded_network_pycgr` | file path | Skip extraction — use pre-extracted PYCGR file |
-| `preloaded_villages_geojson` | file path | Skip extraction — use pre-extracted villages |
-| `preloaded_shelters_geojson` | file path | Skip extraction — use pre-extracted shelters |
-| `preloaded_poi_csv` | file path | Legacy RespondOR v1 combined POI CSV |
-
----
-
-## GAMA Simulation
-
-After running the pipeline and exporting SHP files, prepare GAMA simulation inputs:
-
-```bash
-python -m experiments.prepare_gama_inputs --config configs/demak_flood_2024.yaml
-```
-
-Then in GAMA Platform:
-1. Open `simulation/models/EvacuationModel.gaml`
-2. Set the `inputs_dir` experiment parameter to `output/<scenario_id>/gama_inputs/`
-3. Run `EvacuationExperiment` (GUI) or `BatchHeadless`
-
-The GAMA model reads `villages.csv`, `shelters.csv`, `routes.csv`, `scenario.json`, and optionally `roads.shp` for road-following movement. EvacueeAgents follow pre-computed waypoints from the optimization stage, with BPR congestion modeling and hazard proximity speed penalties.
-
----
-
-## InaRISK API
-
-Hazard data is sourced from BNPB's [InaRISK](https://inarisk.bnpb.go.id) service via the ImageServer identify endpoint.
-
-- API response: `"value": "0.85"` or `"NoData"` (→ 0.0)
-- Normalized score: [0, 1]; values above `max_route_risk_threshold` prune edges as impassable
-- Supported layers: `volcano`, `earthquake`, `flood`, `landslide`
-- Responses cached in `data/raw/osm_cache/<scenario>/` after first query
-- Rate-limited (`inarisk_rate_limit_s`) with up to 2 retries on timeout
-
-> **Note:** InaRISK coverage varies by hazard type and geography. For areas outside the mapped hazard extent (e.g. remote eastern Indonesia for some layers), the API returns `NoData` for all points — this is correct geographic behavior, not a bug. The risk heatmap layer in `evacuation_map.html` is only rendered when at least one village has a risk score > 0.
+| `disaster.type` | — | `volcano` `earthquake` `flood` `landslide` `tsunami` `liquefaction` `flash_flood` |
+| `region.type` | `circle` | `circle` or `bbox` |
+| `region.radius_km` | — | Radius for circle region |
+| `skip_inarisk` | `false` | Set `true` to bypass all InaRISK API calls (offline testing) |
+| `extraction.use_cached_osm` | `true` | Skip OSM HTTP download if cache exists |
+| `extraction.use_cached_inarisk` | `true` | Skip InaRISK API if grid/POI cache covers all points |
+| `extraction.village_sources` | `[building_clusters]` | Ordered village extraction sources |
+| `extraction.village_cluster_eps_m` | `300` | DBSCAN cluster diameter in metres (use `100` for highland Java) |
+| `extraction.village_cluster_max_area_km2` | `25.0` | Skip degenerate large clusters |
+| `extraction.village_fill_uncovered_l9` | `false` | Add synthetic clusters for uncovered L9 (requires wilayah DB) |
+| `extraction.shelter_cluster_eps_m` | `250` | Shelter merge diameter in metres (use `200`) |
+| `extraction.village_pop_density` | `800` | Fallback population density (persons/km²) |
+| `routing.weight_distance` | `0.25` | Distance term weight in composite score |
+| `routing.weight_risk` | `0.30` | Risk term weight |
+| `routing.weight_road_quality` | `0.20` | Road quality term weight |
+| `routing.weight_time` | `0.10` | Travel time term weight |
+| `routing.weight_disaster_distance` | `0.15` | Penalty for shelters near disaster centre |
+| `routing.max_routes_per_village` | `5` | Hard cap on routes per village |
+| `routing.min_routes_per_village` | `3` | Guaranteed floor (1 primary + 2 alternatives) |
+| `routing.hazard_layers` | `{}` | Compound hazard: `{volcano: 0.6, earthquake: 0.4}` |
+| `routing.hazard_aggregation` | `weighted_sum` | `weighted_sum` or `max` |
+| `routing.assignment_method` | `greedy` | `greedy` (fast) or `lp` (optimal, requires scipy) |
+| `execution.mode` | `parallel` | `naive` `parallel` `hpc` |
+| `execution.n_workers` | `4` | Worker count for parallel mode |
+| `preloaded_villages_geojson` | — | Skip extraction — use pre-extracted GeoJSON |
+| `preloaded_shelters_geojson` | — | Skip extraction — use pre-extracted GeoJSON |
+| `preloaded_network_json` | — | Skip extraction — use pre-extracted network JSON |
+| `benchmark_village_limit` | `0` | Limit villages for speed testing (`0` = no limit) |
 
 ---
 
 ## HPC Execution (MPI + SLURM)
 
 ```bash
-# Local test — 4 MPI ranks on one machine
+# Local test
 mpirun -n 4 python -m src.main --config configs/demak_flood_2024.yaml --mode hpc
 
-# Cluster deployment
+# SLURM cluster
 sbatch hpc/slurm_job.sh configs/demak_flood_2024.yaml
 ```
 
 - **Rank 0**: loads OSM data, builds weighted graph, queries InaRISK, broadcasts to workers
 - **Ranks 1..N**: receive a village partition, compute Dijkstra routes independently
-- **Gather**: routes collected at rank 0 for greedy assignment and output
+- **Gather**: routes collected at rank 0 for assignment and output
 
-**Fallback:** If `mpi4py` is not installed, HPC mode automatically uses `ProcessPoolExecutor` on a single node.
-
----
-
-## Preloaded Input Mode
-
-To skip OSM + InaRISK extraction on repeat runs, generate preloaded files once:
-
-```bash
-python -m experiments.build_legacy_input --config configs/demak_flood_2024.yaml
-```
-
-Then run directly from cache:
-
-```bash
-python -m src.main --config output/demak_flood_2024/legacy_input/scenario_preloaded.yaml
-```
-
-The generated `scenario_preloaded.yaml` is identical to the source config but with all `preloaded_*` fields set and `use_cached_osm: true`. POI CSV includes `admin_level` and `source` columns tracking which village extraction method produced each settlement.
+**Fallback:** If `mpi4py` is not installed, HPC mode automatically uses `ProcessPoolExecutor`.
 
 ---
 
-## Testing
+## GAMA Simulation
 
 ```bash
-pytest tests/ -v
-pytest tests/ --cov=src --cov-report=html
+python -m experiments.prepare_gama_inputs --config configs/banjarnegara_landslide_2021.yaml
 ```
+
+Open `misc/EvacuationModel.gaml` in GAMA Platform and set `inputs_dir` to `output/<scenario_id>/gama_inputs/`. The model reads pre-computed routes as waypoints; EvacueeAgents follow road-network paths with BPR congestion modelling.
 
 ---
 
@@ -362,6 +412,6 @@ pytest tests/ --cov=src --cov-report=html
 
 - [InaRISK BNPB](https://inarisk.bnpb.go.id) — Indonesia national hazard risk data
 - [osmnx](https://github.com/gboeing/osmnx) — OpenStreetMap network extraction
-- [GAMA Platform](https://gama-platform.org) — Agent-based modeling for evacuation simulation
+- [GAMA Platform](https://gama-platform.org) — Agent-based modelling for evacuation simulation
 - [OsmToRoadGraph / PYCGR format](https://github.com/AndGem/OsmToRoadGraph) — Legacy network file format
 - [BPR function](https://en.wikipedia.org/wiki/Bureau_of_Public_Roads) — Traffic congestion model
