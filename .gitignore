@@ -55,12 +55,14 @@ logs/
 # ---- OS ----
 .DS_Store
 Thumbs.db
+TODO
 
 # ---- Old projects (misc/) ----
 misc/
 
 # ---- Claude Code ----
 .claude/
+CLAUDE.md
 
 # ---- VSCode ----
 .vscode/

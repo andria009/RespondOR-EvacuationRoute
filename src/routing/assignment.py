@@ -16,8 +16,7 @@ Approach:
 """
 
 import logging
-from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
+from typing import List, Dict, Optional
 
 from src.data.models import (
     Village, Shelter, EvacuationRoute, Assignment, OptimizationResult,

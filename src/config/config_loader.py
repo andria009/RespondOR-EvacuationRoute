@@ -3,7 +3,6 @@ Configuration loader for RespondOR-EvacuationRoute.
 Supports YAML/JSON configs with environment variable overrides.
 """
 
-import os
 import json
 import logging
 from pathlib import Path

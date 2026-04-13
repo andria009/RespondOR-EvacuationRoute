@@ -169,7 +169,6 @@ def build_hazard_map(
 ) -> object:
     """Build a Folium map with hazard grid layers."""
     import folium
-    from folium.plugins import HeatMap
 
     center = [disaster_lat, disaster_lon]
     m = folium.Map(location=center, zoom_start=11, tiles="CartoDB positron")

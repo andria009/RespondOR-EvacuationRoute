@@ -15,18 +15,17 @@ from pathlib import Path
 from multiprocessing import cpu_count
 from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
 from functools import partial
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from src.config.config_loader import AppConfig
 from src.data.models import (
-    DisasterInput, RegionOfInterest, RegionType, DisasterType,
-    ExecutionMode, Village, Shelter, NetworkNode, NetworkEdge
+    DisasterInput, RegionOfInterest, RegionType, DisasterType, ExecutionMode
 )
 from src.data.osm_extractor import OSMExtractor
 from src.data.inarisk_client import InaRISKClient
 from src.data.population_loader import PopulationLoader, ShelterCapacityLoader
 from src.graph.graph_builder import EvacuationGraphBuilder
-from src.routing.heuristic_optimizer import HeuristicOptimizer, _routes_for_village_standalone
+from src.routing.heuristic_optimizer import HeuristicOptimizer
 from src.routing.assignment import PopulationAssigner
 
 logger = logging.getLogger(__name__)

@@ -20,11 +20,6 @@ from src.data.models import NetworkNode, NetworkEdge, Village, Shelter, Disaster
 
 logger = logging.getLogger(__name__)
 
-# BPR parameters
-BPR_ALPHA = 0.15
-BPR_BETA = 4.0
-
-
 class EvacuationGraphBuilder:
     """
     Builds and manages the weighted evacuation graph.
@@ -240,103 +235,6 @@ class EvacuationGraphBuilder:
             f"propagate_poi_risk_to_graph: updated risk on {updated} edges "
             f"from {len(villages)} villages + {len(shelters)} shelters"
         )
-
-    def score_edges_with_risk(
-        self,
-        edges: List[NetworkEdge],
-        risk_scores: Dict[int, Dict[str, float]],  # edge_index -> {disaster_type: score}
-        disaster_type: Optional[DisasterType] = None,
-    ) -> None:
-        """
-        Assign risk scores to edges.
-        risk_scores: maps edge index to dict of {disaster_type: score}.
-        Updates NetworkEdge.risk_score in place.
-        """
-        for i, edge in enumerate(edges):
-            if i in risk_scores:
-                scores_dict = risk_scores[i]
-                if disaster_type and disaster_type.value in scores_dict:
-                    edge.risk_score = scores_dict[disaster_type.value]
-                elif scores_dict:
-                    edge.risk_score = float(sum(scores_dict.values()) / len(scores_dict))
-
-    def apply_flow_congestion(self, G: nx.Graph) -> None:
-        """
-        Update edge travel times using BPR congestion function.
-        Applied after flow assignment.
-        """
-        for u, v, data in G.edges(data=True):
-            flow = data.get("flow", 0.0)
-            cap = data.get("capacity_veh_h", 1.0)
-            if cap <= 0:
-                cap = 1.0
-            t0 = data.get("travel_time_s", 1.0)
-            ratio = flow / cap
-            t_congested = t0 * (1.0 + BPR_ALPHA * (ratio ** BPR_BETA))
-            G[u][v]["travel_time_congested_s"] = t_congested
-
-    def get_subgraph_for_pois(
-        self,
-        villages: List[Village],
-        shelters: List[Shelter],
-        max_hops: int = 20,
-    ) -> nx.Graph:
-        """
-        Extract subgraph connecting village and shelter nodes.
-        Uses ego_graph expansion to include connecting nodes.
-        """
-        if self.G is None:
-            raise ValueError("Graph not built yet. Call build() first.")
-
-        poi_nodes: Set[int] = set()
-        for v in villages:
-            if v.nearest_node_id is not None:
-                poi_nodes.add(v.nearest_node_id)
-        for s in shelters:
-            if s.nearest_node_id is not None:
-                poi_nodes.add(s.nearest_node_id)
-
-        # Include all nodes on shortest paths between POIs
-        relevant = set(poi_nodes)
-        for n in poi_nodes:
-            if n in self.G:
-                ego = nx.ego_graph(self.G, n, radius=max_hops, distance="weight")
-                # Only add nodes also reachable to another POI
-                relevant.update(ego.nodes)
-
-        sub = self.G.subgraph(relevant).copy()
-        logger.info(f"Subgraph: {sub.number_of_nodes()} nodes, {sub.number_of_edges()} edges")
-        return sub
-
-    def export_to_geojson(self, output_path: str) -> None:
-        """Export graph edges as GeoJSON LineString features."""
-        import json
-        if self.G is None:
-            raise ValueError("Graph not built")
-
-        features = []
-        for u, v, data in self.G.edges(data=True):
-            if u not in self._node_coords or v not in self._node_coords:
-                continue
-            u_lat, u_lon = self._node_coords[u]
-            v_lat, v_lon = self._node_coords[v]
-            features.append({
-                "type": "Feature",
-                "geometry": {
-                    "type": "LineString",
-                    "coordinates": [[u_lon, u_lat], [v_lon, v_lat]]
-                },
-                "properties": {
-                    "highway": data.get("highway_type", ""),
-                    "length_m": data.get("length_m", 0),
-                    "risk_score": data.get("risk_score", 0),
-                    "weight": data.get("weight", 0),
-                }
-            })
-
-        with open(output_path, "w") as f:
-            json.dump({"type": "FeatureCollection", "features": features}, f)
-        logger.info(f"Exported graph to {output_path}")
 
 
 # ------------------------------------------------------------------ #

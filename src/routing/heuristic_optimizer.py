@@ -14,7 +14,6 @@ Supports:
 
 import math
 import logging
-import uuid
 from typing import List, Dict, Optional, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
@@ -22,8 +21,7 @@ from functools import partial
 import networkx as nx
 
 from src.data.models import (
-    Village, Shelter, EvacuationRoute, DisasterType,
-    NetworkEdge, ExecutionMode
+    Village, Shelter, EvacuationRoute, ExecutionMode
 )
 
 logger = logging.getLogger(__name__)

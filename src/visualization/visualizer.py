@@ -7,10 +7,9 @@ Generates:
   - Benchmark comparison charts
 """
 
-import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 

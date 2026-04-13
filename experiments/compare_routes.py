@@ -22,7 +22,6 @@ import argparse
 import json
 import logging
 import time
-from copy import deepcopy
 from pathlib import Path
 
 from src.utils.logging_setup import setup_logging as _setup_logging
@@ -244,7 +243,6 @@ def run_pipeline(config_path: Path, label: str):
         weight_road_quality=cfg.routing.weight_road_quality,
         weight_time=cfg.routing.weight_time,
         max_routes_per_village=cfg.routing.max_routes_per_village,
-        max_risk_threshold=cfg.routing.max_route_risk_threshold,
     )
     routes = optimizer.compute_routes(G, villages, shelters, mode=ExecutionMode.NAIVE)
     routes_by_village = optimizer.rank_routes(routes)

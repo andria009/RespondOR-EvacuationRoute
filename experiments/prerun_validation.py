@@ -15,7 +15,6 @@ import json
 import logging
 import math
 import sys
-import time
 from pathlib import Path
 
 from src.config.config_loader import load_config

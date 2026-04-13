@@ -26,7 +26,26 @@ from pathlib import Path
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from shapely.geometry import Point, shape
+import pyproj
+from shapely.geometry import Point
+from shapely.ops import transform as _shapely_transform
+
+
+def _circle_polygon(lat: float, lon: float, area_m2: float, min_radius_m: float = 80.0):
+    """
+    Return a WGS84 Polygon circle centred on (lat, lon) with area = area_m2.
+    Minimum radius enforced so small clusters stay visible at scenario scale.
+    """
+    import math
+    radius_m = max(min_radius_m, math.sqrt(area_m2 / math.pi))
+    zone = int((lon + 180) / 6) + 1
+    hem  = "south" if lat < 0 else "north"
+    utm_crs = f"+proj=utm +zone={zone} +{hem} +datum=WGS84"
+    to_utm  = pyproj.Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True).transform
+    to_wgs  = pyproj.Transformer.from_crs(utm_crs, "EPSG:4326", always_xy=True).transform
+    center_utm = _shapely_transform(to_utm, Point(lon, lat))
+    circle_utm = center_utm.buffer(radius_m, resolution=32)
+    return _shapely_transform(to_wgs, circle_utm)
 
 from src.utils.logging_setup import setup_logging as _setup_logging
 _setup_logging("export_shp")
@@ -136,11 +155,9 @@ def load_villages(extractor, region, cfg) -> gpd.GeoDataFrame:
 
     rows = []
     for v in villages:
-        try:
-            geom = shape({"type": "Point", "coordinates": [v.centroid_lon, v.centroid_lat]}) \
-                if not v.geometry_wkt else __import__("shapely.wkt", fromlist=["loads"]).loads(v.geometry_wkt)
-        except Exception:
-            geom = shape({"type": "Point", "coordinates": [v.centroid_lon, v.centroid_lat]})
+        # Use a circle of equivalent area so geometry type is always Polygon
+        # and clusters remain visible at scenario scale (min 80 m radius).
+        geom = _circle_polygon(v.centroid_lat, v.centroid_lon, v.area_m2, min_radius_m=80.0)
         rows.append({
             "village_id": v.village_id,
             "name":       str(v.name)[:80],
@@ -179,11 +196,8 @@ def load_shelters(extractor, region, cfg) -> gpd.GeoDataFrame:
 
     rows = []
     for s in shelters:
-        try:
-            geom = shape({"type": "Point", "coordinates": [s.centroid_lon, s.centroid_lat]}) \
-                if not s.geometry_wkt else __import__("shapely.wkt", fromlist=["loads"]).loads(s.geometry_wkt)
-        except Exception:
-            geom = shape({"type": "Point", "coordinates": [s.centroid_lon, s.centroid_lat]})
+        # Use a circle of equivalent area — consistent Polygon type, visible at scenario scale.
+        geom = _circle_polygon(s.centroid_lat, s.centroid_lon, s.area_m2, min_radius_m=50.0)
         rows.append({
             "shelter_id": s.shelter_id,
             "name":       str(s.name)[:80],

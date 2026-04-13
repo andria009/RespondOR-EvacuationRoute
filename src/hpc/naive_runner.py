@@ -7,7 +7,6 @@ Serves as the baseline for speedup benchmarking.
 import time
 import logging
 from pathlib import Path
-from typing import Optional
 
 from src.config.config_loader import AppConfig
 from src.data.models import (

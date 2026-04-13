@@ -5,7 +5,7 @@ Uses dataclasses for lightweight structured data.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple
 from enum import Enum
 
 

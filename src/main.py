@@ -22,7 +22,6 @@ Usage:
 import argparse
 import json
 import logging
-import sys
 from pathlib import Path
 
 from src.utils.logging_setup import setup_logging as _setup_logging
