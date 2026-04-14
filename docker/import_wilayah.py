@@ -40,8 +40,11 @@ log = logging.getLogger("import_wilayah")
 # ------------------------------------------------------------------ #
 MISC = Path(__file__).parent.parent / "misc"
 WILAYAH_DIR       = MISC / "cahayadsn-wilayah" / "db"
+# https://github.com/cahyadsn/wilayah/tree/master/db
 BOUNDARIES_DIR    = MISC / "cahayadsn-wilayah_boundaries" / "db"
+# https://github.com/cahyadsn/wilayah_boundaries/tree/main/db
 KODEPOS_DIR       = MISC / "cahayadsn-wilayah_kodepos" / "db"
+# https://github.com/cahyadsn/wilayah_kodepos
 
 BATCH_SIZE = 2000
 

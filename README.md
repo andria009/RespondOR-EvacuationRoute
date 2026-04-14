@@ -170,7 +170,7 @@ pip install -r requirements.txt
 
 ### Wilayah DB (optional, for L9/L8 admin context in tooltips)
 
-The wilayah PostGIS database provides official Indonesian kelurahan/desa (L9) and kecamatan (L8) boundaries. Used to:
+The wilayah PostGIS database ([Wilayah DB](https://github.com/cahyadsn/wilayah)) provides official Indonesian kelurahan/desa (L9) and kecamatan (L8) boundaries. Used to:
 - Assign structured names (`C_33.10.03.2001_2`, `S_33.10.03.2001_1`) to building clusters
 - Show L9/L8 breadcrumbs in map tooltips
 - Fill uncovered L9 with synthetic clusters (`village_fill_uncovered_l9: true`)
@@ -456,3 +456,4 @@ Open `simulation/models/EvacuationModel.gaml` in GAMA Platform 2025+ and set `in
 - [GAMA Platform](https://gama-platform.org) — Agent-based modelling for evacuation simulation
 - [OsmToRoadGraph / PYCGR format](https://github.com/AndGem/OsmToRoadGraph) — Legacy network file format
 - [BPR function](https://en.wikipedia.org/wiki/Bureau_of_Public_Roads) — Traffic congestion model
+- [Wilayah DB](https://github.com/cahyadsn/wilayah) - Wilayah Indonesia

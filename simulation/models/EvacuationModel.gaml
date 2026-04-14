@@ -355,8 +355,8 @@ global {
             }
             write "=== Simulation ended at step " + cycle + " ===";
             write "  Scenario:   " + scenario_id;
-            write "  Safe:       " + n_safe_final  + " agents (~" + (n_safe_final  * people_per_agent) + " people)";
-            write "  Dead:       " + n_dead_final  + " agents (~" + (n_dead_final  * people_per_agent) + " people)";
+            write "  Survied:    " + n_safe_final  + " agents (~" + (n_safe_final  * people_per_agent) + " people)";
+            write "  Affected:   " + n_dead_final  + " agents (~" + (n_dead_final  * people_per_agent) + " people)";
             write "  Survival:   " + (round(survival_rate * 10.0) / 10.0) + "%";
             write "  In transit: " + n_transit + " agents remaining";
             write "  Avg evac time:   " + (round(avg_evac_time_min   * 10.0) / 10.0) + " min";
@@ -645,8 +645,8 @@ experiment "Evacuation Simulation" type: gui {
     output {
         monitor "Scenario"              value: scenario_id;
         monitor "In Transit"            value: Evacuee count (each.status = "transit");
-        monitor "Safe"                  value: Evacuee count (each.status = "safe");
-        monitor "Dead"                  value: Evacuee count (each.status = "dead");
+        monitor "Survived"              value: Evacuee count (each.status = "safe");
+        monitor "Affected"              value: Evacuee count (each.status = "dead");
         monitor "Rerouted"              value: Evacuee count (each.rerouted = true);
         monitor "Villages"              value: length(Village);
         monitor "Shelters"              value: length(Shelter);
@@ -684,8 +684,8 @@ experiment "Evacuation Simulation" type: gui {
         display StatusChart type: 2d background: #white {
             chart "Evacuee Status" type: series x_label: "Step" y_label: "Agents" background: #white {
                 data "In Transit"    value: Evacuee count (each.status = "transit") color: rgb(255, 140, 0);
-                data "Safe"          value: Evacuee count (each.status = "safe")    color: rgb(0, 180, 0);
-                data "Dead"          value: Evacuee count (each.status = "dead")    color: rgb(200, 0, 0);
+                data "Survied"       value: Evacuee count (each.status = "safe")    color: rgb(0, 180, 0);
+                data "Affected"      value: Evacuee count (each.status = "dead")    color: rgb(200, 0, 0);
                 data "Rerouted ever" value: Evacuee count (each.rerouted = true)    color: rgb(180, 160, 0);
             }
         }
@@ -701,8 +701,8 @@ experiment "Evacuation Simulation" type: gui {
         display EvacuationOutcome type: 2d background: #white {
             chart "Evacuation Outcome (people)" type: pie background: #white {
                 data "In Transit" value: (Evacuee count (each.status = "transit")) * people_per_agent color: rgb(255, 140, 0);
-                data "Safe"       value: Shelter sum_of each.people_arrived                           color: rgb(0, 180, 0);
-                data "Dead"       value: (Evacuee count (each.status = "dead"))    * people_per_agent color: rgb(200, 0, 0);
+                data "Survied"    value: Shelter sum_of each.people_arrived                           color: rgb(0, 180, 0);
+                data "Affected"   value: (Evacuee count (each.status = "dead"))    * people_per_agent color: rgb(200, 0, 0);
             }
         }
 
@@ -775,8 +775,8 @@ experiment "Batch — Compare All Scenarios" type: batch
             }
         }
 
-        display "Deaths" type: 2d background: #white {
-            chart "Dead Agents by Scenario"
+        display "Affected" type: 2d background: #white {
+            chart "Affected Agents by Scenario"
                 type: histogram x_label: "Scenario" y_label: "Agents" background: #white {
                 datalist
                     ["S1 Nearest", "S2 Aware", "S3 Best Route", "S4 Random"]
