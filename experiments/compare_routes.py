@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 from src.utils.logging_setup import setup_logging as _setup_logging
+from src.visualization.visualizer import _quintile_class_list
 _setup_logging("compare_routes")
 logger = logging.getLogger("compare_routes")
 
@@ -34,27 +35,6 @@ OSM_COLOR     = "#1a4e8a"   # blue border  – OSM villages
 LEGACY_COLOR  = "#5e3d8a"   # purple border – legacy villages
 POP_COLORS    = ["#c6dbef", "#6baed6", "#2171b5", "#084594", "#08306b"]  # blue quintiles
 CAP_COLORS    = ["#c7e9c0", "#74c476", "#238b45", "#005a32", "#00441b"]  # green quintiles
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _quintile_class_list(values: list) -> list:
-    if not values:
-        return []
-    nonzero = sorted(v for v in values if v > 0)
-    if not nonzero:
-        return [1] * len(values)
-    m = len(nonzero)
-    q = [nonzero[max(0, int(p / 100 * m) - 1)] for p in [20, 40, 60, 80]]
-    result = []
-    for v in values:
-        if v <= 0:       result.append(1)
-        elif v <= q[0]:  result.append(1)
-        elif v <= q[1]:  result.append(2)
-        elif v <= q[2]:  result.append(3)
-        elif v <= q[3]:  result.append(4)
-        else:            result.append(5)
-    return result
 
 
 def _load_polygon_geoms(path: "Path", id_field: str) -> dict:

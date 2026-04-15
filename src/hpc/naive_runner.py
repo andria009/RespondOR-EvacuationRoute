@@ -18,27 +18,9 @@ from src.data.population_loader import PopulationLoader, ShelterCapacityLoader
 from src.graph.graph_builder import EvacuationGraphBuilder
 from src.routing.heuristic_optimizer import HeuristicOptimizer
 from src.routing.assignment import PopulationAssigner
+from src.hpc.runner_utils import resolve_hazard_layers
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_hazard_layers(cfg, disaster) -> dict:
-    """
-    Return {DisasterType: weight} for risk enrichment.
-    Uses cfg.routing.hazard_layers when configured; falls back to
-    {disaster.disaster_type: 1.0} for single-layer scenarios.
-    """
-    raw = cfg.routing.hazard_layers  # {str: float}
-    if raw:
-        resolved = {}
-        for name, weight in raw.items():
-            try:
-                resolved[DisasterType(name)] = float(weight)
-            except ValueError:
-                logger.warning(f"Unknown hazard layer '{name}' in hazard_layers — skipping")
-        if resolved:
-            return resolved
-    return {disaster.disaster_type: 1.0}
 
 
 class NaiveRunner:
@@ -93,7 +75,7 @@ class NaiveRunner:
         G = builder.build(nodes, edges, disaster_type=disaster.disaster_type)
         builder.attach_pois_to_graph(villages, shelters)
         if not cfg.skip_inarisk:
-            hazard_layers = _resolve_hazard_layers(cfg, disaster)
+            hazard_layers = resolve_hazard_layers(cfg, disaster)
             inarisk = InaRISKClient(
                 batch_size=cfg.extraction.inarisk_batch_size,
                 rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
@@ -224,7 +206,7 @@ class NaiveRunner:
         cap_loader.apply_capacity(
             shelters,
             capacity_csv=cfg.extraction.shelter_capacity_csv,
-            m2_per_person=cfg.extraction.m2_per_person,
+            m2_per_person=cfg.extraction.shelter_m2_per_person,
         )
 
         return nodes, edges, villages, shelters
@@ -242,7 +224,7 @@ class NaiveRunner:
             batch_size=cfg.extraction.inarisk_batch_size,
             rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
         )
-        hazard_layers = _resolve_hazard_layers(cfg, disaster)
+        hazard_layers = resolve_hazard_layers(cfg, disaster)
         cache_path = Path(cfg.extraction.inarisk_cache_dir) / "poi_risk_cache.json"
         grid_cache_path = Path(cfg.extraction.inarisk_cache_dir) / "road_risk_cache.json"
         use_cache = cfg.extraction.use_cached_inarisk

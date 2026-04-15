@@ -47,10 +47,12 @@ def parse_args():
                    help="Output directory (overrides config)")
     p.add_argument("--log-level", default=None,
                    help="Logging level (DEBUG/INFO/WARNING/ERROR)")
+    p.add_argument("--assignment-method", choices=["greedy", "lp"],
+                   help="Assignment algorithm (overrides config): greedy (fast) | lp (optimal)")
     return p.parse_args()
 
 
-def run_optimization(config, mode_override=None, workers_override=None):
+def run_optimization(config, mode_override=None, workers_override=None, assignment_method_override=None):
     """Run the optimization pipeline in the specified mode."""
     from src.data.models import ExecutionMode
 
@@ -58,6 +60,8 @@ def run_optimization(config, mode_override=None, workers_override=None):
         config.execution.mode = mode_override
     if workers_override:
         config.execution.n_workers = workers_override
+    if assignment_method_override:
+        config.routing.assignment_method = assignment_method_override
 
     mode = ExecutionMode(config.execution.mode)
     logging.info(f"Starting optimization in {mode.value.upper()} mode")
@@ -79,9 +83,6 @@ def run_optimization(config, mode_override=None, workers_override=None):
 
 def save_optimization_result(result, villages, shelters, routes_by_village, output_dir: str):
     """Save optimization results to JSON for downstream use."""
-    import json
-    from pathlib import Path
-
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -113,6 +114,14 @@ def _load_viz_extras(config, villages, shelters, G=None) -> tuple:
              shelter_admin_ctx, hazard_scores).
     """
     from shapely.wkt import loads as _wkt_loads
+    from src.data.models import RegionOfInterest, RegionType
+
+    region = RegionOfInterest(
+        region_type=RegionType(config.region.region_type),
+        bbox=tuple(config.region.bbox) if config.region.bbox else None,
+        center=tuple(config.region.center) if config.region.center else None,
+        radius_km=config.region.radius_km,
+    )
 
     # Geometries straight from model objects
     village_geoms = {}
@@ -139,10 +148,8 @@ def _load_viz_extras(config, villages, shelters, G=None) -> tuple:
                 node_coords[n] = (d["lat"], d["lon"])
 
     if not node_coords:
-        import json as _json
-        from pathlib import Path as _Path
-        cache_dir = _Path(config.extraction.osm_cache_dir)
-        npath = (_Path(config.preloaded_network_json)
+        cache_dir = Path(config.extraction.osm_cache_dir)
+        npath = (Path(config.preloaded_network_json)
                  if config.preloaded_network_json else None)
         if npath is None:
             candidates = sorted(cache_dir.glob("network_*.json"), key=lambda p: p.stat().st_mtime)
@@ -150,7 +157,7 @@ def _load_viz_extras(config, villages, shelters, G=None) -> tuple:
         if npath and npath.exists():
             try:
                 with open(npath) as f:
-                    nd = _json.load(f)
+                    nd = json.load(f)
                 for n in nd.get("nodes", []):
                     node_coords[n["id"]] = (n["lat"], n["lon"])
             except Exception:
@@ -162,13 +169,6 @@ def _load_viz_extras(config, villages, shelters, G=None) -> tuple:
     try:
         from src.data.wilayah_loader import WilayahLoader
         from experiments.preview_region import build_cluster_context, _shelter_admin_context
-        from src.data.models import RegionOfInterest, RegionType
-        region = RegionOfInterest(
-            region_type=RegionType(config.region.region_type),
-            bbox=tuple(config.region.bbox) if config.region.bbox else None,
-            center=tuple(config.region.center) if config.region.center else None,
-            radius_km=config.region.radius_km,
-        )
         region_bbox = region.to_bbox()
         with WilayahLoader() as wloader:
             l8_villages = wloader.load_villages(bbox=region_bbox, admin_levels=[8])
@@ -182,19 +182,10 @@ def _load_viz_extras(config, villages, shelters, G=None) -> tuple:
     # Hazard scores: load from hazard_grid_cache.json, clip to scenario bbox
     hazard_scores = {}
     try:
-        import json as _json
-        from pathlib import Path as _Path
-        from src.data.models import RegionOfInterest, RegionType
-        cache_path = _Path(config.extraction.inarisk_cache_dir) / "hazard_grid_cache.json"
+        cache_path = Path(config.extraction.inarisk_cache_dir) / "hazard_grid_cache.json"
         if cache_path.exists():
             with open(cache_path) as f:
-                full_cache = _json.load(f)
-            region = RegionOfInterest(
-                region_type=RegionType(config.region.region_type),
-                bbox=tuple(config.region.bbox) if config.region.bbox else None,
-                center=tuple(config.region.center) if config.region.center else None,
-                radius_km=config.region.radius_km,
-            )
+                full_cache = json.load(f)
             south, west, north, east = region.to_bbox()
             # Determine which hazard layers to show
             if config.routing.hazard_layers:
@@ -260,8 +251,6 @@ def save_graph_stats(G, output_dir: str, disaster_type: str):
 def save_routes(routes_by_village, villages, shelters, output_dir: str):
     """Save all candidate routes to routes.csv and routes_summary.json."""
     import csv
-    import json
-    from pathlib import Path
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -335,6 +324,7 @@ def main():
         config,
         mode_override=args.mode,
         workers_override=args.workers,
+        assignment_method_override=args.assignment_method,
     )
 
     # ------------------------------------------------------------------ #

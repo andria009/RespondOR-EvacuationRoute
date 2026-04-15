@@ -34,27 +34,9 @@ from src.routing.heuristic_optimizer import (
     HeuristicOptimizer, _routes_for_village_standalone,
 )
 from src.routing.assignment import PopulationAssigner
+from src.hpc.runner_utils import resolve_hazard_layers
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_hazard_layers(cfg, disaster) -> dict:
-    """
-    Return {DisasterType: weight} for risk enrichment.
-    Uses cfg.routing.hazard_layers when configured; falls back to
-    {disaster.disaster_type: 1.0} for single-layer scenarios.
-    """
-    raw = cfg.routing.hazard_layers  # {str: float}
-    if raw:
-        resolved = {}
-        for name, weight in raw.items():
-            try:
-                resolved[DisasterType(name)] = float(weight)
-            except ValueError:
-                logger.warning(f"Unknown hazard layer '{name}' in hazard_layers — skipping")
-        if resolved:
-            return resolved
-    return {disaster.disaster_type: 1.0}
 
 
 class MPIRunner:
@@ -102,7 +84,7 @@ class MPIRunner:
             G = builder.build(nodes, edges, disaster_type=disaster.disaster_type)
             builder.attach_pois_to_graph(villages, shelters)
             if not cfg.skip_inarisk:
-                hazard_layers_edges = _resolve_hazard_layers(cfg, disaster)
+                hazard_layers_edges = resolve_hazard_layers(cfg, disaster)
                 inarisk = InaRISKClient(
                     batch_size=cfg.extraction.inarisk_batch_size,
                     rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
@@ -129,12 +111,13 @@ class MPIRunner:
 
         # ---- Scatter village partitions ----
         routing_params = {
-            "w_dist":      cfg.routing.weight_distance,
-            "w_risk":      cfg.routing.weight_risk,
-            "w_quality":   cfg.routing.weight_road_quality,
-            "w_time":      cfg.routing.weight_time,
-            "max_routes":  cfg.routing.max_routes_per_village,
-            "max_risk":    cfg.routing.max_route_risk_threshold,
+            "w_dist":            cfg.routing.weight_distance,
+            "w_risk":            cfg.routing.weight_risk,
+            "w_quality":         cfg.routing.weight_road_quality,
+            "w_time":            cfg.routing.weight_time,
+            "w_disaster":        cfg.routing.weight_disaster_distance,
+            "max_routes":        cfg.routing.max_routes_per_village,
+            "disaster_location": (cfg.disaster.lat, cfg.disaster.lon),
         }
 
         if rank == 0:
@@ -179,10 +162,13 @@ class MPIRunner:
         else:
             all_routes_gathered = [my_routes]
 
-        # Worker ranks are done — exit cleanly
+        # Worker ranks are done — exit cleanly.
+        # comm.gather() is itself a collective that synchronises all ranks,
+        # so no additional Barrier is needed here.  Calling Barrier after
+        # gather would hang workers indefinitely because rank 0 never
+        # reaches that Barrier — it continues with assignment and I/O instead.
         if rank != 0:
             if comm is not None:
-                comm.Barrier()
                 from mpi4py import MPI
                 MPI.Finalize()
             sys.exit(0)
@@ -298,12 +284,12 @@ class MPIRunner:
         PopulationLoader().apply_population(
             villages,
             population_csv=cfg.extraction.population_csv,
-            density_per_km2=cfg.extraction.default_pop_density,
+            density_per_km2=cfg.extraction.village_pop_density,
         )
         ShelterCapacityLoader().apply_capacity(
             shelters,
             capacity_csv=cfg.extraction.shelter_capacity_csv,
-            m2_per_person=cfg.extraction.m2_per_person,
+            m2_per_person=cfg.extraction.shelter_m2_per_person,
         )
         return nodes, edges, villages, shelters
 
@@ -320,7 +306,7 @@ class MPIRunner:
             batch_size=cfg.extraction.inarisk_batch_size,
             rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
         )
-        hazard_layers = _resolve_hazard_layers(cfg, disaster)
+        hazard_layers = resolve_hazard_layers(cfg, disaster)
         cache_path = Path(cfg.extraction.inarisk_cache_dir) / "poi_risk_cache.json"
         use_cache = cfg.extraction.use_cached_inarisk
         if len(hazard_layers) > 1:
