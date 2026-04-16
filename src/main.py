@@ -49,10 +49,13 @@ def parse_args():
                    help="Logging level (DEBUG/INFO/WARNING/ERROR)")
     p.add_argument("--assignment-method", choices=["greedy", "lp"],
                    help="Assignment algorithm (overrides config): greedy (fast) | lp (optimal)")
+    p.add_argument("--village-limit", type=int, default=None,
+                   help="Cap number of villages processed (overrides config; useful for benchmarking)")
     return p.parse_args()
 
 
-def run_optimization(config, mode_override=None, workers_override=None, assignment_method_override=None):
+def run_optimization(config, mode_override=None, workers_override=None,
+                     assignment_method_override=None, village_limit_override=None):
     """Run the optimization pipeline in the specified mode."""
     from src.data.models import ExecutionMode
 
@@ -62,6 +65,8 @@ def run_optimization(config, mode_override=None, workers_override=None, assignme
         config.execution.n_workers = workers_override
     if assignment_method_override:
         config.routing.assignment_method = assignment_method_override
+    if village_limit_override is not None:
+        config.benchmark_village_limit = village_limit_override
 
     mode = ExecutionMode(config.execution.mode)
     logging.info(f"Starting optimization in {mode.value.upper()} mode")
@@ -325,6 +330,7 @@ def main():
         mode_override=args.mode,
         workers_override=args.workers,
         assignment_method_override=args.assignment_method,
+        village_limit_override=args.village_limit,
     )
 
     # ------------------------------------------------------------------ #

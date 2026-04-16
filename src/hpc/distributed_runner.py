@@ -8,16 +8,34 @@ Execution model:
   - Ranks 1..N-1 (workers): receive graph + shelters, compute routes for
     their assigned village partition, send results back to rank 0.
 
-Launch:
-  srun --mpi=pmix -n $SLURM_NTASKS python -m src.main --config ... --mode hpc
+Hybrid MPI × multiprocessing:
+  Each MPI rank processes its village partition using ProcessPoolExecutor
+  with n_workers workers (controlled by execution.n_workers / --workers).
+  This lets you use all cores on each node:
+
+    mpirun -n 4 python -m src.main --config ... --mode hpc --workers 32
+    # → 4 MPI ranks × 32 processes each = 128 cores total
+
+  Set --workers 1 (or execution.n_workers: 1) to disable intra-rank
+  parallelism and fall back to serial routing per rank.
+
+  ProcessPoolExecutor uses the 'spawn' start method (not 'fork') to avoid
+  MPI + fork deadlocks on Linux. This adds ~0.5s startup overhead per rank,
+  amortised over large village partitions.
+
+SLURM launch:
+  srun --mpi=pmix -n $SLURM_NTASKS python -m src.main --config ... --mode hpc --workers $SLURM_CPUS_PER_TASK
 
 Fallback (no mpi4py installed):
   ProcessPoolExecutor on a single node.
 """
 
+import multiprocessing as mp
 import sys
 import time
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
@@ -34,7 +52,7 @@ from src.routing.heuristic_optimizer import (
     HeuristicOptimizer, _routes_for_village_standalone,
 )
 from src.routing.assignment import PopulationAssigner
-from src.hpc.runner_utils import resolve_hazard_layers
+from src.hpc.runner_utils import resolve_hazard_layers, apply_risk_parallel, MemoryTracker
 
 logger = logging.getLogger(__name__)
 
@@ -65,19 +83,24 @@ class MPIRunner:
 
         cfg = self.config
         timings = {}
+        memory_mb = {}
+        mem = MemoryTracker()
 
         # ---- Rank 0: full data loading ----
         if rank == 0:
             disaster, region = self._build_inputs(cfg)
 
+            m0 = mem.rss_mb()
             t0 = time.perf_counter()
             nodes, edges, villages, shelters = self._extract_data(region, cfg)
             timings["extraction"] = time.perf_counter() - t0
+            m0 = mem.snapshot("extraction", m0, memory_mb)
             logger.info(f"[rank 0] Extracted: {len(villages)}V {len(shelters)}S")
 
             t0 = time.perf_counter()
             self._apply_risk(villages, shelters, disaster, cfg)
             timings["risk_scoring"] = time.perf_counter() - t0
+            m0 = mem.snapshot("risk_scoring", m0, memory_mb)
 
             t0 = time.perf_counter()
             builder = EvacuationGraphBuilder()
@@ -98,6 +121,7 @@ class MPIRunner:
                 )
             builder.propagate_poi_risk_to_graph(villages, shelters)
             timings["graph_build"] = time.perf_counter() - t0
+            m0 = mem.snapshot("graph_build", m0, memory_mb)
             logger.info(f"[rank 0] Graph: {G.number_of_nodes()}N {G.number_of_edges()}E")
         else:
             disaster = villages = shelters = G = None
@@ -139,21 +163,46 @@ class MPIRunner:
         shelter_nodes = {s.nearest_node_id: s for s in shelters
                          if s.nearest_node_id is not None}
 
+        n_workers_per_rank = cfg.execution.n_workers
+
         t0_routing = time.perf_counter()
         my_routes: List[EvacuationRoute] = []
-        for v in my_villages:
-            routes = _routes_for_village_standalone(
-                village=v,
+        if n_workers_per_rank > 1 and len(my_villages) > 1:
+            compute_fn = partial(
+                _routes_for_village_standalone,
                 G=G,
                 shelters=shelters,
                 shelter_nodes=shelter_nodes,
                 **routing_params,
             )
-            my_routes.extend(routes)
+            mp_ctx = mp.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=n_workers_per_rank, mp_context=mp_ctx
+            ) as executor:
+                futures = {executor.submit(compute_fn, v): v for v in my_villages}
+                for future in as_completed(futures):
+                    try:
+                        my_routes.extend(future.result())
+                    except Exception as e:
+                        v = futures[future]
+                        logger.warning(
+                            f"[rank {rank}] Village {v.village_id} routing failed: {e}"
+                        )
+        else:
+            for v in my_villages:
+                routes = _routes_for_village_standalone(
+                    village=v,
+                    G=G,
+                    shelters=shelters,
+                    shelter_nodes=shelter_nodes,
+                    **routing_params,
+                )
+                my_routes.extend(routes)
         routing_time = time.perf_counter() - t0_routing
         logger.info(
             f"[rank {rank}] Computed {len(my_routes)} routes "
-            f"for {len(my_villages)} villages in {routing_time:.1f}s"
+            f"for {len(my_villages)} villages in {routing_time:.1f}s "
+            f"({n_workers_per_rank} worker{'s' if n_workers_per_rank != 1 else ''})"
         )
 
         # ---- Gather routes at rank 0 ----
@@ -200,6 +249,10 @@ class MPIRunner:
             runtime_s=total_runtime,
         )
         timings["assignment"] = time.perf_counter() - t0
+        mem.snapshot("assignment", mem.rss_mb(), memory_mb)
+
+        # Gather peak RSS from all ranks (workers already exited, so only rank 0 here)
+        rank0_peak = mem.peak_rss_mb()
 
         total_time = sum(timings.values())
         result.runtime_s = total_time
@@ -210,7 +263,10 @@ class MPIRunner:
             f"({100*result.evacuation_ratio:.1f}%) | ranks={size} ==="
         )
 
-        self._save_timings(timings, n_ranks=size)
+        self._save_timings(
+            timings, memory_mb, rank0_peak,
+            n_ranks=size, n_workers_per_rank=cfg.execution.n_workers,
+        )
         return result, villages, shelters, routes_by_village, timings, G
 
     # ------------------------------------------------------------------ #
@@ -294,42 +350,29 @@ class MPIRunner:
         return nodes, edges, villages, shelters
 
     def _apply_risk(self, villages, shelters, disaster, cfg):
-        if cfg.skip_inarisk:
-            logger.warning("skip_inarisk=true — all risk scores set to 0.0 (InaRISK bypassed)")
-            for v in villages:
-                v.risk_scores["composite"] = 0.0
-            for s in shelters:
-                s.risk_scores["composite"] = 0.0
-            return
+        apply_risk_parallel(cfg, villages, shelters, disaster, n_threads=cfg.execution.n_workers)
 
-        inarisk = InaRISKClient(
-            batch_size=cfg.extraction.inarisk_batch_size,
-            rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
-        )
-        hazard_layers = resolve_hazard_layers(cfg, disaster)
-        cache_path = Path(cfg.extraction.inarisk_cache_dir) / "poi_risk_cache.json"
-        use_cache = cfg.extraction.use_cached_inarisk
-        if len(hazard_layers) > 1:
-            logger.info(
-                f"Compound hazard: {', '.join(f'{dt.value}×{w}' for dt, w in hazard_layers.items())}"
-                f" [{cfg.routing.hazard_aggregation}]"
-            )
-            inarisk.enrich_villages_compound(villages, hazard_layers, cfg.routing.hazard_aggregation, cache_path=cache_path, use_cache=use_cache)
-            inarisk.enrich_shelters_compound(shelters, hazard_layers, cfg.routing.hazard_aggregation, cache_path=cache_path, use_cache=use_cache)
-        else:
-            inarisk.enrich_villages_with_risk(villages, disaster.disaster_type, cache_path=cache_path, use_cache=use_cache)
-            inarisk.enrich_shelters_with_risk(shelters, disaster.disaster_type, cache_path=cache_path, use_cache=use_cache)
-
-    def _save_timings(self, timings: dict, n_ranks: int = 1):
+    def _save_timings(
+        self,
+        timings: dict,
+        memory_mb: dict,
+        peak_rss_mb: float,
+        n_ranks: int = 1,
+        n_workers_per_rank: int = 1,
+    ):
         import json
-        out_path = self.output_dir / "timings_hpc.json"
+        out_path = self.output_dir / f"timings_hpc_{n_ranks}r_{n_workers_per_rank}w.json"
         with open(out_path, "w") as f:
             json.dump({
                 "mode": "hpc",
                 "framework": "mpi",
                 "n_ranks": n_ranks,
+                "n_workers_per_rank": n_workers_per_rank,
+                "total_cores": n_ranks * n_workers_per_rank,
                 "timings": timings,
                 "total": sum(timings.values()),
+                "memory_mb": memory_mb,
+                "peak_rss_mb": round(peak_rss_mb, 1),
             }, f, indent=2)
         logger.info(f"Timings saved to {out_path}")
 

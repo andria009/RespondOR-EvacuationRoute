@@ -18,7 +18,7 @@ from src.data.population_loader import PopulationLoader, ShelterCapacityLoader
 from src.graph.graph_builder import EvacuationGraphBuilder
 from src.routing.heuristic_optimizer import HeuristicOptimizer
 from src.routing.assignment import PopulationAssigner
-from src.hpc.runner_utils import resolve_hazard_layers
+from src.hpc.runner_utils import resolve_hazard_layers, MemoryTracker
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,8 @@ class NaiveRunner:
         """Execute full pipeline sequentially. Returns OptimizationResult."""
         cfg = self.config
         timings = {}
+        memory_mb = {}
+        mem = MemoryTracker()
 
         logger.info("=== NAIVE (SEQUENTIAL) MODE ===")
 
@@ -57,9 +59,11 @@ class NaiveRunner:
         )
 
         # ---- Stage 2: Extract data ----
+        m0 = mem.rss_mb()
         t0 = time.perf_counter()
         nodes, edges, villages, shelters = self._extract_data(region, cfg)
         timings["extraction"] = time.perf_counter() - t0
+        m0 = mem.snapshot("extraction", m0, memory_mb)
         logger.info(f"[{timings['extraction']:.2f}s] Extracted: "
                     f"{len(nodes)}N {len(edges)}E {len(villages)}V {len(shelters)}S")
 
@@ -67,6 +71,7 @@ class NaiveRunner:
         t0 = time.perf_counter()
         self._apply_risk_scores(villages, shelters, disaster, cfg)
         timings["risk_scoring"] = time.perf_counter() - t0
+        m0 = mem.snapshot("risk_scoring", m0, memory_mb)
         logger.info(f"[{timings['risk_scoring']:.2f}s] Risk scores applied")
 
         # ---- Stage 4: Graph construction ----
@@ -89,6 +94,7 @@ class NaiveRunner:
             )
         builder.propagate_poi_risk_to_graph(villages, shelters)
         timings["graph_build"] = time.perf_counter() - t0
+        m0 = mem.snapshot("graph_build", m0, memory_mb)
         logger.info(f"[{timings['graph_build']:.2f}s] Graph built: "
                     f"{G.number_of_nodes()}N {G.number_of_edges()}E")
 
@@ -112,6 +118,7 @@ class NaiveRunner:
         routes = optimizer.compute_routes(G, villages, shelters, mode=ExecutionMode.NAIVE)
         routes_by_village = optimizer.rank_routes(routes)
         timings["routing"] = time.perf_counter() - t0
+        m0 = mem.snapshot("routing", m0, memory_mb)
         logger.info(f"[{timings['routing']:.2f}s] Computed {len(routes)} candidate routes")
 
         # ---- Stage 6: Population assignment ----
@@ -127,6 +134,7 @@ class NaiveRunner:
             runtime_s=sum(timings.values()),
         )
         timings["assignment"] = time.perf_counter() - t0
+        mem.snapshot("assignment", m0, memory_mb)
 
         total_time = sum(timings.values())
         result.runtime_s = total_time
@@ -137,7 +145,7 @@ class NaiveRunner:
             f"({100*result.evacuation_ratio:.1f}%) ==="
         )
 
-        self._save_timings(timings)
+        self._save_timings(timings, memory_mb, mem.peak_rss_mb())
         return result, villages, shelters, routes_by_village, timings, G
 
     def _extract_data(self, region, cfg):
@@ -239,10 +247,15 @@ class NaiveRunner:
             inarisk.enrich_villages_with_risk(villages, disaster.disaster_type, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
             inarisk.enrich_shelters_with_risk(shelters, disaster.disaster_type, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
 
-    def _save_timings(self, timings: dict):
+    def _save_timings(self, timings: dict, memory_mb: dict, peak_rss_mb: float):
         import json
         out_path = self.output_dir / "timings_naive.json"
         with open(out_path, "w") as f:
-            json.dump({"mode": "naive", "timings": timings,
-                       "total": sum(timings.values())}, f, indent=2)
+            json.dump({
+                "mode": "naive",
+                "timings": timings,
+                "total": sum(timings.values()),
+                "memory_mb": memory_mb,
+                "peak_rss_mb": round(peak_rss_mb, 1),
+            }, f, indent=2)
         logger.info(f"Timings saved to {out_path}")

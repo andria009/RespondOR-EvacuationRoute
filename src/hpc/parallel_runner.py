@@ -27,7 +27,7 @@ from src.data.population_loader import PopulationLoader, ShelterCapacityLoader
 from src.graph.graph_builder import EvacuationGraphBuilder
 from src.routing.heuristic_optimizer import HeuristicOptimizer
 from src.routing.assignment import PopulationAssigner
-from src.hpc.runner_utils import resolve_hazard_layers
+from src.hpc.runner_utils import resolve_hazard_layers, apply_risk_parallel, MemoryTracker
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,8 @@ class ParallelRunner:
         """Execute full pipeline in parallel. Returns OptimizationResult."""
         cfg = self.config
         timings = {}
+        memory_mb = {}
+        mem = MemoryTracker()
 
         logger.info(f"=== PARALLEL MODE ({self.n_workers} workers) ===")
 
@@ -64,9 +66,11 @@ class ParallelRunner:
         )
 
         # ---- Stage 1: Parallel data extraction ----
+        m0 = mem.rss_mb()
         t0 = time.perf_counter()
         nodes, edges, villages, shelters = self._extract_parallel(region, cfg)
         timings["extraction"] = time.perf_counter() - t0
+        m0 = mem.snapshot("extraction", m0, memory_mb)
         logger.info(f"[{timings['extraction']:.2f}s] Extracted (parallel): "
                     f"{len(nodes)}N {len(edges)}E {len(villages)}V {len(shelters)}S")
 
@@ -74,6 +78,7 @@ class ParallelRunner:
         t0 = time.perf_counter()
         self._apply_risk_parallel(villages, shelters, disaster, cfg)
         timings["risk_scoring"] = time.perf_counter() - t0
+        m0 = mem.snapshot("risk_scoring", m0, memory_mb)
         logger.info(f"[{timings['risk_scoring']:.2f}s] Risk scores (parallel)")
 
         # ---- Stage 3: Graph build (single-core, fast) ----
@@ -96,6 +101,7 @@ class ParallelRunner:
             )
         builder.propagate_poi_risk_to_graph(villages, shelters)
         timings["graph_build"] = time.perf_counter() - t0
+        m0 = mem.snapshot("graph_build", m0, memory_mb)
 
         # ---- Optional: limit villages for benchmarking ----
         limit = cfg.benchmark_village_limit
@@ -121,6 +127,7 @@ class ParallelRunner:
         )
         routes_by_village = optimizer.rank_routes(routes)
         timings["routing"] = time.perf_counter() - t0
+        m0 = mem.snapshot("routing", m0, memory_mb)
         logger.info(f"[{timings['routing']:.2f}s] Routing (parallel): {len(routes)} routes")
 
         # ---- Stage 5: Assignment ----
@@ -133,13 +140,14 @@ class ParallelRunner:
             mode=ExecutionMode.PARALLEL,
         )
         timings["assignment"] = time.perf_counter() - t0
+        mem.snapshot("assignment", m0, memory_mb)
 
         total_time = sum(timings.values())
         result.runtime_s = total_time
         logger.info(f"=== DONE [{total_time:.2f}s] | "
                     f"Evacuated: {result.total_evacuated}/{result.total_population} ===")
 
-        self._save_timings(timings)
+        self._save_timings(timings, memory_mb, mem.peak_rss_mb())
         return result, villages, shelters, routes_by_village, timings, G
 
     # ------------------------------------------------------------------ #
@@ -222,37 +230,17 @@ class ParallelRunner:
     # ------------------------------------------------------------------ #
 
     def _apply_risk_parallel(self, villages, shelters, disaster, cfg):
-        if cfg.skip_inarisk:
-            logger.warning("skip_inarisk=true — all risk scores set to 0.0 (InaRISK bypassed)")
-            for v in villages:
-                v.risk_scores["composite"] = 0.0
-            for s in shelters:
-                s.risk_scores["composite"] = 0.0
-            return
+        apply_risk_parallel(cfg, villages, shelters, disaster, n_threads=self.n_workers)
 
-        inarisk = InaRISKClient(
-            batch_size=cfg.extraction.inarisk_batch_size,
-            rate_limit_s=cfg.extraction.inarisk_rate_limit_s,
-        )
-        hazard_layers = resolve_hazard_layers(cfg, disaster)
-        # Sequential for cache safety — villages write cache, then shelters read+extend it
-        cache_path = Path(cfg.extraction.inarisk_cache_dir) / "poi_risk_cache.json"
-        grid_cache_path = Path(cfg.extraction.inarisk_cache_dir) / "road_risk_cache.json"
-        use_cache = cfg.extraction.use_cached_inarisk
-        if len(hazard_layers) > 1:
-            logger.info(
-                f"Compound hazard: {', '.join(f'{dt.value}×{w}' for dt, w in hazard_layers.items())}"
-                f" [{cfg.routing.hazard_aggregation}]"
-            )
-            inarisk.enrich_villages_compound(villages, hazard_layers, cfg.routing.hazard_aggregation, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
-            inarisk.enrich_shelters_compound(shelters, hazard_layers, cfg.routing.hazard_aggregation, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
-        else:
-            inarisk.enrich_villages_with_risk(villages, disaster.disaster_type, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
-            inarisk.enrich_shelters_with_risk(shelters, disaster.disaster_type, cache_path=cache_path, use_cache=use_cache, grid_cache_path=grid_cache_path)
-
-    def _save_timings(self, timings: dict):
+    def _save_timings(self, timings: dict, memory_mb: dict, peak_rss_mb: float):
         import json
         out_path = self.output_dir / f"timings_parallel_{self.n_workers}w.json"
         with open(out_path, "w") as f:
-            json.dump({"mode": "parallel", "n_workers": self.n_workers,
-                       "timings": timings, "total": sum(timings.values())}, f, indent=2)
+            json.dump({
+                "mode": "parallel",
+                "n_workers": self.n_workers,
+                "timings": timings,
+                "total": sum(timings.values()),
+                "memory_mb": memory_mb,
+                "peak_rss_mb": round(peak_rss_mb, 1),
+            }, f, indent=2)

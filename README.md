@@ -40,6 +40,7 @@ RespondOR-EvacuationRoute/
 │       └── inarisk_cache/              # InaRISK POI + road + hazard grid cache
 ├── docker/
 │   ├── import_wilayah.py               # Populate wilayah PostGIS DB from shapefiles
+│   ├── import_wilayah_sqlite.py        # Portable SQLite alternative (no Docker needed)
 │   └── init/                           # DB initialisation SQL
 ├── docker-compose.yml                  # PostGIS wilayah DB (for L9 kelurahan boundaries)
 ├── experiments/
@@ -49,7 +50,11 @@ RespondOR-EvacuationRoute/
 │   ├── export_shp.py                   # Export villages/shelters/roads as SHP + GeoJSON
 │   ├── prepare_gama_inputs.py          # Write GAMA simulation inputs (CSV + SHP + JSON)
 │   ├── build_legacy_input.py           # Build preloaded/legacy input files from OSM cache
-│   └── compare_routes.py              # Compare route outputs across scenarios
+│   ├── compare_routes.py               # Compare route outputs across scenarios
+│   ├── benchmark_all.py                # Full pipeline benchmark: all scenarios × all execution modes
+│   └── benchmark_extraction.py         # Extraction-only benchmark: OSM + InaRISK isolation runs
+├── helper/
+│   └── benchmark_compare.py            # Print/compare benchmark_results.json from the terminal
 ├── simulation/
 │   └── models/
 │       └── EvacuationModel.gaml        # GAMA agent-based evacuation model (4 modes, BPR, batch sweep)
@@ -62,13 +67,13 @@ RespondOR-EvacuationRoute/
 │   │   ├── models.py                   # Core dataclasses (Village, Shelter, Route, ...)
 │   │   ├── osm_extractor.py            # OSM extraction + multi-source villages + circular shelters
 │   │   ├── population_loader.py        # Population and shelter capacity estimation
-│   │   └── wilayah_loader.py           # PostGIS wilayah DB loader (L8/L9 admin boundaries)
+│   │   └── wilayah_loader.py           # Wilayah DB loader — SQLite or PostgreSQL+PostGIS
 │   ├── graph/graph_builder.py          # Weighted NetworkX evacuation graph + InaRISK enrichment
 │   ├── hpc/
 │   │   ├── naive_runner.py             # Sequential single-process pipeline
 │   │   ├── parallel_runner.py          # ThreadPool (I/O) + ProcessPool (routing)
-│   │   ├── distributed_runner.py       # MPI runner (mpi4py; fallback: ProcessPool)
-│   │   └── runner_utils.py             # Shared helpers for all runners
+│   │   ├── distributed_runner.py       # Hybrid MPI × multiprocessing runner (mpi4py; fallback: ProcessPool)
+│   │   └── runner_utils.py             # Shared helpers: MemoryTracker, apply_risk_parallel, resolve_hazard_layers
 │   ├── routing/
 │   │   ├── heuristic_optimizer.py      # Dijkstra-based route computation and scoring
 │   │   └── assignment.py               # Greedy / LP population-to-shelter assignment
@@ -153,9 +158,9 @@ Greedy algorithm: sort all (village, shelter, route) candidates by composite sco
 ### Requirements
 
 - Python 3.14 (via pyenv)
-- Docker (for wilayah PostGIS DB — optional but recommended)
 - GAMA Platform 2025+ (for simulation, optional)
 - OpenMPI or Intel MPI (for HPC mode, optional)
+- Docker (for PostgreSQL+PostGIS wilayah backend — optional; SQLite is the portable default)
 
 ### Installation
 
@@ -176,9 +181,19 @@ The wilayah PostGIS database ([Wilayah DB](https://github.com/cahyadsn/wilayah))
 - Show L9/L8 breadcrumbs in map tooltips
 - Fill uncovered L9 with synthetic clusters (`village_fill_uncovered_l9: true`)
 
+**Option A — SQLite (portable, no Docker required):**
+
+```bash
+python -m docker.import_wilayah_sqlite   # outputs data/wilayah.db (~430 MB, ~40s)
+```
+
+`WilayahLoader` auto-discovers `data/wilayah.db` — no config needed. Override the path with `WILAYAH_SQLITE_PATH` env var or `WilayahLoader(sqlite_path=...)`.
+
+**Option B — PostgreSQL+PostGIS (Docker):**
+
 ```bash
 docker compose up -d
-python docker/import_wilayah.py   # populate DB from shapefile data
+python docker/import_wilayah.py
 ```
 
 ---
@@ -205,11 +220,14 @@ python -m src.main --config configs/merapi_eruption_2023.yaml --mode parallel --
 # LP assignment (optimal, ~20 ms overhead vs greedy)
 python -m src.main --config configs/banjarnegara_landslide_2021.yaml --assignment-method lp
 
+# Limit villages for quick testing
+python -m src.main --config configs/merapi_eruption_2023.yaml --village-limit 100
+
 # HPC/MPI (multi-node)
-srun --mpi=pmix -n 32 python -m src.main --config configs/palu_earthquake_2018.yaml --mode hpc
+srun --mpi=pmix -n 32 python -m src.main --config configs/palu_earthquake_2018.yaml --mode hpc --workers 32
 
 # HPC/MPI local test
-mpirun -n 4 python -m src.main --config configs/lewotobi_eruption_2024.yaml --mode hpc
+mpirun -n 2 python -m src.main --config configs/lewotobi_eruption_2024.yaml --mode hpc --workers 4
 ```
 
 ### Preview region and hazard before running
@@ -275,9 +293,9 @@ All outputs written to `output/<scenario_id>/`:
 | `routes_summary.json` | Same as routes.csv in JSON |
 | `graph_stats.json` | Edge count, risk distribution histogram (zero / very_low / … / very_high) |
 | `evacuation_summary.png` | Coverage pie chart + shelter utilisation bar chart |
-| `timings_naive.json` | Stage-by-stage runtime (naive mode) |
-| `timings_parallel_Nw.json` | Stage-by-stage runtime (parallel mode, N workers) |
-| `timings_hpc.json` | Stage-by-stage runtime (HPC/MPI mode) |
+| `timings_naive.json` | Stage-by-stage runtime + per-phase memory delta (naive mode) |
+| `timings_parallel_Nw.json` | Stage-by-stage runtime + per-phase memory delta (parallel mode, N workers) |
+| `timings_hpc_Nr_Mw.json` | Stage-by-stage runtime + per-phase memory delta (HPC/MPI mode, N ranks × M workers) |
 | `gama_inputs/` | GAMA simulation inputs — generated separately by `prepare_gama_inputs.py` |
 | `gama_shp/` | SHP exports — generated separately by `export_shp.py` |
 | `route_comparison/` | Side-by-side OSM vs legacy comparison — generated by `compare_routes.py` |
@@ -359,7 +377,7 @@ Villages can be extracted from multiple OSM sources, composable in any order:
 | `admin_boundary` | `boundary=administrative` closed polygons at configured admin levels | Java, Sumatra — well-mapped admin data |
 | `place_nodes` | `place=village\|hamlet\|...` point nodes → synthetic circles | Remote islands, highlands with sparse admin data |
 | `building_clusters` | DBSCAN-grouped building footprints → convex hull polygons | Dense areas with good building traces but no boundaries |
-| `wilayah_db` | Official L9 kelurahan polygons from PostGIS DB | Complete coverage with structured naming |
+| `wilayah_db` | Official L9 kelurahan polygons from wilayah DB (SQLite or PostGIS) | Complete coverage with structured naming |
 
 **Synthetic clusters** (`village_fill_uncovered_l9: true`): when a kelurahan has no OSM building data, a single synthetic circular cluster is placed at the kelurahan centroid, named `S_[L9-kode]_1`.
 
@@ -409,18 +427,104 @@ Full annotated examples: [configs/](configs/)
 ## HPC Execution (MPI + SLURM)
 
 ```bash
-# Local test
-mpirun -n 4 python -m src.main --config configs/demak_flood_2024.yaml --mode hpc
+# Local test — 2 MPI ranks × 4 workers = 8 cores
+mpirun -n 2 python -m src.main --config configs/demak_flood_2024.yaml --mode hpc --workers 4
 
 # SLURM cluster
 sbatch hpc/slurm_job.sh configs/demak_flood_2024.yaml
+
+# SLURM with hybrid parallelism (4 nodes × 32 cores)
+srun --mpi=pmix -n 4 python -m src.main --config configs/palu_earthquake_2018.yaml --mode hpc --workers 32
 ```
 
-- **Rank 0**: loads OSM data, builds weighted graph, queries InaRISK, broadcasts to workers
-- **Ranks 1..N**: receive a village partition, compute Dijkstra routes independently
-- **Gather**: routes collected at rank 0 for assignment and output
+- **Rank 0**: loads OSM data, builds weighted graph, queries InaRISK, broadcasts to all ranks
+- **Ranks 1..N**: receive a village partition (round-robin), compute Dijkstra routes independently
+- **Intra-rank parallelism**: each rank processes its partition using `ProcessPoolExecutor` with `--workers` processes (spawn method — avoids MPI + fork deadlocks on Linux)
+- **Gather**: all routes collected at rank 0 for assignment and output
 
-**Fallback:** If `mpi4py` is not installed, HPC mode automatically uses `ProcessPoolExecutor`.
+**Total cores**: `n MPI ranks × --workers processes per rank`. Example: `mpirun -n 4 --workers 32` = 128 cores.
+
+**Fallback:** If `mpi4py` is not installed, HPC mode automatically uses `ProcessPoolExecutor` on a single node.
+
+---
+
+## Benchmarking
+
+Two benchmark scripts measure pipeline performance across execution modes and scenarios.
+
+### Full pipeline benchmark (`benchmark_all.py`)
+
+Runs all scenarios × all execution modes, recording per-phase timing and peak memory consumption.
+
+```bash
+# All scenarios, all modes (warm cache recommended — run benchmark_extraction first)
+python -m experiments.benchmark_all
+
+# Specific scenarios only
+python -m experiments.benchmark_all --scenarios banjarnegara_landslide_2021 merapi_eruption_2023
+
+# Custom mode subset
+python -m experiments.benchmark_all --modes naive parallel_4w parallel_8w hpc_2r_8w
+
+# Quick test — limit villages per scenario
+python -m experiments.benchmark_all --scenarios banjarnegara_landslide_2021 \
+    --parallel-workers 2 4 8 --hpc-ranks 2 --hpc-workers 4 8 --village-limit 100
+
+# Resume interrupted run (skip completed entries)
+python -m experiments.benchmark_all --resume
+
+# Dry-run — print commands without executing
+python -m experiments.benchmark_all --dry-run
+```
+
+**Default execution matrix** (13 modes × N scenarios):
+
+| Category | Variants |
+|---|---|
+| Naive | 1 worker |
+| Parallel | 2, 4, 8, 16, 32, 64 workers |
+| HPC (MPI) | ranks ∈ {2, 4} × workers ∈ {8, 16, 64} |
+
+**Outputs** (written to `output/`):
+
+| File | Description |
+|---|---|
+| `benchmark_results.json` | All run entries: timings, memory, mode metadata |
+| `benchmark_results.csv` | Flat CSV for analysis (one row per run) |
+
+### Extraction-only benchmark (`benchmark_extraction.py`)
+
+Benchmarks OSM extraction and InaRISK risk scoring in isolation — skips graph build, routing, and assignment. Use this to pre-warm caches on a new server before running `benchmark_all`.
+
+```bash
+# Pre-warm all caches for all scenarios (fresh download)
+python -m experiments.benchmark_extraction --no-cache --skip-inarisk-edges
+
+# Also pre-warm InaRISK road edge cache
+python -m experiments.benchmark_extraction --no-cache
+
+# Compare sequential vs parallel OSM extraction
+python -m experiments.benchmark_extraction --osm-modes sequential parallel
+
+# Compare InaRISK thread counts (use --no-cache-inarisk for real API throughput)
+python -m experiments.benchmark_extraction --inarisk-threads 1 2 4 8 --no-cache-inarisk
+
+# Full matrix: 2 OSM modes × 4 thread counts
+python -m experiments.benchmark_extraction \
+    --osm-modes sequential parallel --inarisk-threads 1 2 4 8 --no-cache-inarisk
+```
+
+**Output:** `output/benchmark_extraction.json`
+
+### Recommended workflow for a new server
+
+```bash
+# 1. Pre-warm OSM + InaRISK POI caches for all scenarios
+python -m experiments.benchmark_extraction --no-cache --skip-inarisk-edges
+
+# 2. Run full benchmark (InaRISK edge cache warmed by the first scenario's first run)
+python -m experiments.benchmark_all --resume
+```
 
 ---
 

@@ -388,6 +388,7 @@ class InaRISKClient:
         self._save_poi_cache(cache, cache_path)
         for v, score in zip(villages, scores):
             v.risk_scores[disaster_type.value] = score
+            v.risk_scores["composite"] = round(score, 4)
 
     def enrich_shelters_with_risk(
         self,
@@ -407,6 +408,7 @@ class InaRISKClient:
         self._save_poi_cache(cache, cache_path)
         for s, score in zip(shelters, scores):
             s.risk_scores[disaster_type.value] = score
+            s.risk_scores["composite"] = round(score, 4)
 
     def enrich_with_compound_risk(
         self,

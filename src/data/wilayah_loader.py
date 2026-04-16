@@ -1,13 +1,21 @@
 """
-WilayahLoader — query the PostGIS wilayah database and return Village objects
-with official Indonesian administrative boundaries and population estimates.
+WilayahLoader — query the wilayah database and return Village objects
+with official Indonesian administrative boundaries.
 
-The database is populated by running:
-    docker compose up -d
-    python docker/import_wilayah.py
+Supports two backends (auto-detected, or set explicitly):
 
-Connection defaults match docker-compose.yml (localhost:5432, db=wilayah,
-user/password=respondor).  Override via environment variables or constructor.
+  SQLite (portable, no server):
+    WilayahLoader(sqlite_path="data/wilayah.db")
+    # or set env: WILAYAH_SQLITE_PATH=data/wilayah.db
+    # or place file at data/wilayah.db — auto-discovered
+
+  PostgreSQL+PostGIS (Docker, production):
+    WilayahLoader()   # uses WILAYAH_DB_* env vars or defaults
+
+Build the SQLite file:
+    python -m docker.import_wilayah_sqlite
+Build the PostgreSQL DB:
+    docker compose up -d && python docker/import_wilayah.py
 
 Usage in extract_villages() pipeline:
     sources: [wilayah_db, building_clusters]
@@ -18,9 +26,13 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Default SQLite path relative to project root (auto-discovered if it exists)
+_DEFAULT_SQLITE = Path(__file__).parent.parent.parent / "data" / "wilayah.db"
 
 
 @dataclass
@@ -34,17 +46,45 @@ class WilayahDBConfig:
 
 class WilayahLoader:
     """
-    Load kelurahan/desa boundaries from the local PostGIS wilayah database
-    and return them as Village objects.
+    Load kelurahan/desa boundaries from the wilayah database and return
+    them as Village objects.
 
-    Population strategy (best available, in priority order):
-    1. wilayah_penduduk (kab-level total) divided evenly among its kelurahan.
-    2. Fallback: area_km2 * population_density_per_km2.
+    Backend selection (first match wins):
+      1. ``sqlite_path`` constructor argument
+      2. ``WILAYAH_SQLITE_PATH`` environment variable
+      3. ``data/wilayah.db`` if that file exists  ← portable default
+      4. PostgreSQL (docker-compose) via ``WilayahDBConfig``
+
+    Population strategy:
+      Population is NOT estimated from the DB — wilayah_penduduk only has
+      kab-level totals, so per-kelurahan estimates would be meaningless
+      uniform averages. All returned villages have population=0.
+      Population should be set by the building-cluster source.
     """
 
-    def __init__(self, config: Optional[WilayahDBConfig] = None):
-        self.config = config or WilayahDBConfig()
-        self._conn = None
+    def __init__(
+        self,
+        sqlite_path: Optional[str | Path] = None,
+        config: Optional[WilayahDBConfig] = None,
+    ):
+        # Resolve SQLite path (env var > constructor arg > default location)
+        env_path = os.environ.get("WILAYAH_SQLITE_PATH")
+        if sqlite_path is not None:
+            self._sqlite_path = Path(sqlite_path)
+        elif env_path:
+            self._sqlite_path = Path(env_path)
+        elif _DEFAULT_SQLITE.exists():
+            self._sqlite_path = _DEFAULT_SQLITE
+        else:
+            self._sqlite_path = None
+
+        self._pg_config = config or WilayahDBConfig()
+        self._pg_conn = None
+
+        if self._sqlite_path:
+            logger.debug(f"WilayahLoader: SQLite backend → {self._sqlite_path}")
+        else:
+            logger.debug("WilayahLoader: PostgreSQL backend")
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -61,45 +101,119 @@ class WilayahLoader:
         """
         Return Village objects whose boundaries intersect *bbox*.
 
-        Population is NOT estimated from the DB — wilayah_penduduk only has
-        kab-level totals, so per-kelurahan estimates would be meaningless
-        uniform averages.  All returned villages have population=0.
-        Population should be set by the building-cluster source.
-
         bbox: (min_lat, min_lon, max_lat, max_lon)
-        admin_levels: kode-length filter.
-            None / [9] → kelurahan only (kode len=13)
-            [8]        → kecamatan (kode len=8)
-            [7]        → kabupaten (kode len=5)
-        max_area_km2: discard boundaries larger than this (default 100 km²).
+        admin_levels: None/[9] → kelurahan (kode len=13)
+                      [8]      → kecamatan (kode len=8)
+                      [7]      → kabupaten (kode len=5)
+        max_area_km2: discard boundaries larger than this.
         """
+        max_area_m2 = max_area_km2 * 1e6
+        if self._sqlite_path:
+            villages = self._load_sqlite(bbox, admin_levels, max_area_m2)
+        else:
+            villages = self._load_postgres(bbox, admin_levels, max_area_m2)
+        logger.info(f"WilayahLoader: loaded {len(villages)} villages (bbox={bbox})")
+        return villages
+
+    # ------------------------------------------------------------------ #
+    # SQLite backend
+    # ------------------------------------------------------------------ #
+
+    def _load_sqlite(self, bbox, admin_levels, max_area_m2) -> List:
+        import sqlite3
+        from shapely.geometry import box as shapely_box
+        from shapely.wkt import loads as wkt_loads
         from src.data.models import Village
 
-        conn = self._get_conn()
+        min_lat, min_lon, max_lat, max_lon = bbox
+
+        level_map = {9: 13, 8: 8, 7: 5}
+        if admin_levels:
+            lengths = [level_map[al] for al in admin_levels if al in level_map]
+        else:
+            lengths = [13]
+
+        bbox_poly = shapely_box(min_lon, min_lat, max_lon, max_lat)
+        # Expand centroid filter by 0.5° to catch polygons whose centroid
+        # sits outside the bbox but whose geometry still intersects it.
+        buf = 0.5
+
+        conn = sqlite3.connect(self._sqlite_path)
+        villages = []
+        try:
+            for kode_len in lengths:
+                rows = conn.execute(
+                    """
+                    SELECT kode, nama, lat, lng, area_m2, geom_wkt
+                    FROM wilayah_boundaries
+                    WHERE LENGTH(kode) = ?
+                      AND lat BETWEEN ? AND ?
+                      AND lng BETWEEN ? AND ?
+                    ORDER BY kode
+                    """,
+                    (kode_len,
+                     min_lat - buf, max_lat + buf,
+                     min_lon - buf, max_lon + buf),
+                ).fetchall()
+
+                for kode, nama, lat, lng, area_m2, geom_wkt in rows:
+                    if not geom_wkt:
+                        continue
+                    if max_area_m2 and area_m2 and area_m2 > max_area_m2:
+                        continue
+
+                    try:
+                        geom = wkt_loads(geom_wkt)
+                        if not geom.intersects(bbox_poly):
+                            continue
+                    except Exception:
+                        continue
+
+                    if lat is None or lng is None:
+                        try:
+                            c = geom.centroid
+                            lat, lng = c.y, c.x
+                        except Exception:
+                            continue
+
+                    villages.append(Village(
+                        village_id=f"wilayah_{kode}",
+                        name=nama or kode,
+                        centroid_lat=lat,
+                        centroid_lon=lng,
+                        population=0,
+                        area_m2=area_m2 or 0.0,
+                        admin_level=self._kode_to_admin_level(kode),
+                        geometry_wkt=geom_wkt,
+                    ))
+        finally:
+            conn.close()
+
+        return villages
+
+    # ------------------------------------------------------------------ #
+    # PostgreSQL backend
+    # ------------------------------------------------------------------ #
+
+    def _load_postgres(self, bbox, admin_levels, max_area_m2) -> List:
+        from src.data.models import Village
+
+        conn = self._get_pg_conn()
         cur = conn.cursor()
 
         min_lat, min_lon, max_lat, max_lon = bbox
-        # Build a bbox envelope in PostGIS (note: x=lon, y=lat)
-        bbox_wkt = (
-            f"ST_MakeEnvelope({min_lon},{min_lat},{max_lon},{max_lat},4326)"
-        )
+        bbox_wkt = f"ST_MakeEnvelope({min_lon},{min_lat},{max_lon},{max_lat},4326)"
 
-        # Resolve kode length filter
-        # L4 kelurahan kode = "33.22.01.2001" (13 chars)
-        # L3 kecamatan kode = "33.22.01"      (8 chars)
-        # L2 kabupaten kode = "33.22"          (5 chars)
         level_map = {9: 13, 8: 8, 7: 5}
         if admin_levels:
             length_filter = " OR ".join(
                 f"LENGTH(b.kode) = {level_map.get(al, 13)}"
-                for al in admin_levels
-                if al in level_map
+                for al in admin_levels if al in level_map
             )
             length_clause = f"AND ({length_filter})"
         else:
             length_clause = "AND LENGTH(b.kode) = 13"
 
-        max_area_m2 = max_area_km2 * 1e6
         sql = f"""
             SELECT
                 b.kode,
@@ -132,41 +246,40 @@ class WilayahLoader:
                 else:
                     continue
 
-            v = Village(
+            villages.append(Village(
                 village_id=f"wilayah_{kode}",
                 name=nama or kode,
                 centroid_lat=lat,
                 centroid_lon=lng,
-                population=0,       # no per-kelurahan population in DB
+                population=0,
                 area_m2=area_m2 or 0.0,
                 admin_level=self._kode_to_admin_level(kode),
                 geometry_wkt=geom_wkt,
-            )
-            villages.append(v)
+            ))
 
         cur.close()
-        logger.info(f"WilayahLoader: loaded {len(villages)} villages from DB (bbox={bbox})")
         return villages
 
     # ------------------------------------------------------------------ #
-    # Internal helpers
+    # Helpers
     # ------------------------------------------------------------------ #
 
-    def _get_conn(self):
-        if self._conn is None or self._conn.closed:
+    def _get_pg_conn(self):
+        if self._pg_conn is None or self._pg_conn.closed:
             try:
                 import psycopg2
             except ImportError:
                 raise RuntimeError(
-                    "psycopg2 not installed. Run: pip install psycopg2-binary"
+                    "psycopg2 not installed. Run: pip install psycopg2-binary\n"
+                    "Or use the SQLite backend: python -m docker.import_wilayah_sqlite"
                 )
-            cfg = self.config
-            self._conn = psycopg2.connect(
+            cfg = self._pg_config
+            self._pg_conn = psycopg2.connect(
                 host=cfg.host, port=cfg.port,
                 dbname=cfg.dbname, user=cfg.user, password=cfg.password,
             )
-            self._conn.autocommit = True
-        return self._conn
+            self._pg_conn.autocommit = True
+        return self._pg_conn
 
     @staticmethod
     def _kode_to_admin_level(kode: str) -> int:
@@ -177,8 +290,8 @@ class WilayahLoader:
         return 9               # kelurahan/desa
 
     def close(self):
-        if self._conn and not self._conn.closed:
-            self._conn.close()
+        if self._pg_conn and not self._pg_conn.closed:
+            self._pg_conn.close()
 
     def __enter__(self):
         return self
