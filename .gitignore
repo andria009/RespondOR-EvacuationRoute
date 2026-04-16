@@ -45,6 +45,9 @@ coverage.xml
 data/raw/osm_cache/
 data/raw/
 
+# ---- Wilayah DB (large SQLite, generated locally) ----
+data/wilayah.db
+
 # ---- Output (generated artifacts) ----
 output/
 
