@@ -83,13 +83,22 @@ def _build_mode_matrix(
     parallel_workers: list[int],
     hpc_ranks: list[int],
     hpc_workers: list[int],
+    assignment_methods: list[str] = None,
 ) -> list[dict]:
-    """Return list of mode descriptors."""
-    modes = []
+    """
+    Return list of mode descriptors.
+    When multiple assignment_methods are given, each execution mode is
+    duplicated once per method and the method is appended to the mode id
+    (e.g. naive__greedy, naive__lp).  With a single method the id is
+    unchanged for backward-compatibility.
+    """
+    if assignment_methods is None:
+        assignment_methods = ["greedy"]
+
+    base_modes = []
 
     # naive
-    modes.append({
-        "id":        "naive",
+    base_modes.append({
         "mode":      "naive",
         "n_workers": 1,
         "n_ranks":   1,
@@ -100,8 +109,7 @@ def _build_mode_matrix(
 
     # parallel
     for w in parallel_workers:
-        modes.append({
-            "id":        f"parallel_{w}w",
+        base_modes.append({
             "mode":      "parallel",
             "n_workers": w,
             "n_ranks":   1,
@@ -113,8 +121,7 @@ def _build_mode_matrix(
     # hpc (MPI)
     for r in hpc_ranks:
         for w in hpc_workers:
-            modes.append({
-                "id":        f"hpc_{r}r_{w}w",
+            base_modes.append({
                 "mode":      "hpc",
                 "n_workers": w,
                 "n_ranks":   r,
@@ -123,6 +130,22 @@ def _build_mode_matrix(
                 "mpi_ranks": r,
                 "timings_file": f"timings_hpc_{r}r_{w}w.json",
             })
+
+    # Multiply by assignment methods
+    multi = len(assignment_methods) > 1
+    modes = []
+    for bm in base_modes:
+        for method in assignment_methods:
+            m = dict(bm)
+            base_id = (
+                "naive" if m["mode"] == "naive"
+                else f"parallel_{m['n_workers']}w" if m["mode"] == "parallel"
+                else f"hpc_{m['n_ranks']}r_{m['n_workers']}w"
+            )
+            m["id"] = f"{base_id}__{method}" if multi else base_id
+            m["assignment_method"] = method
+            m["cmd_extra"] = list(m["cmd_extra"]) + ["--assignment-method", method]
+            modes.append(m)
 
     return modes
 
@@ -265,7 +288,7 @@ def _write_csv(results: list[dict]) -> None:
     phases = ["extraction", "risk_scoring", "graph_build", "routing", "assignment"]
     fieldnames = [
         "scenario", "mode_id", "mode", "n_ranks", "n_workers", "total_cores",
-        "success", "wall_time_s", "total_pipeline_s", "peak_rss_mb",
+        "assignment_method", "success", "wall_time_s", "total_pipeline_s", "peak_rss_mb",
     ]
     for p in phases:
         fieldnames += [f"{p}_time_s", f"{p}_delta_mb"]
@@ -276,13 +299,14 @@ def _write_csv(results: list[dict]) -> None:
         writer.writeheader()
         for r in results:
             row = {
-                "scenario":        r.get("scenario"),
-                "mode_id":         r.get("mode_id"),
-                "mode":            r.get("mode"),
-                "n_ranks":         r.get("n_ranks"),
-                "n_workers":       r.get("n_workers"),
-                "total_cores":     r.get("total_cores"),
-                "success":         r.get("success"),
+                "scenario":          r.get("scenario"),
+                "mode_id":           r.get("mode_id"),
+                "mode":              r.get("mode"),
+                "n_ranks":           r.get("n_ranks"),
+                "n_workers":         r.get("n_workers"),
+                "total_cores":       r.get("total_cores"),
+                "assignment_method": r.get("assignment_method", "greedy"),
+                "success":           r.get("success"),
                 "wall_time_s":     r.get("wall_time_s"),
                 "total_pipeline_s": r.get("total_s"),
                 "peak_rss_mb":     r.get("peak_rss_mb"),
@@ -311,7 +335,8 @@ def main():
     )
     parser.add_argument(
         "--modes", nargs="*",
-        help="Mode IDs to run. Available: naive, parallel_Nw, hpc_Nr_Mw. "
+        help="Mode IDs to run. Available: naive, parallel_Nw, hpc_Nr_Mw "
+             "(with --assignment-methods greedy lp the IDs become naive__greedy, naive__lp, etc.). "
              "Default: all modes in the matrix.",
     )
     parser.add_argument(
@@ -331,6 +356,13 @@ def main():
         default=[8, 16, 64],
         metavar="W",
         help="Workers per rank for HPC mode (default: 8 16 64)",
+    )
+    parser.add_argument(
+        "--assignment-methods", nargs="+", choices=["greedy", "lp"],
+        default=["greedy"],
+        metavar="METHOD",
+        help="Assignment method(s) to benchmark (default: greedy). "
+             "Pass both to double the matrix: --assignment-methods greedy lp",
     )
     parser.add_argument(
         "--timeout", type=int, default=3600,
@@ -374,6 +406,7 @@ def main():
         parallel_workers=args.parallel_workers,
         hpc_ranks=args.hpc_ranks,
         hpc_workers=args.hpc_workers,
+        assignment_methods=args.assignment_methods,
     )
 
     if args.modes:
@@ -433,13 +466,14 @@ def main():
                 continue
 
             entry = {
-                "scenario":    scenario_id,
-                "mode_id":     mode["id"],
-                "mode":        mode["mode"],
-                "n_ranks":     mode["n_ranks"],
-                "n_workers":   mode["n_workers"],
-                "total_cores": mode["total_cores"],
-                "timestamp":   datetime.now().isoformat(),
+                "scenario":          scenario_id,
+                "mode_id":           mode["id"],
+                "mode":              mode["mode"],
+                "n_ranks":           mode["n_ranks"],
+                "n_workers":         mode["n_workers"],
+                "total_cores":       mode["total_cores"],
+                "assignment_method": mode["assignment_method"],
+                "timestamp":         datetime.now().isoformat(),
                 **run_result,
             }
             results.append(entry)
