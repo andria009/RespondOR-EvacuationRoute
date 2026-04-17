@@ -55,6 +55,9 @@ RespondOR-EvacuationRoute/
 │   └── benchmark_extraction.py         # Extraction-only benchmark: OSM + InaRISK isolation runs
 ├── helper/
 │   └── benchmark_compare.py            # Print/compare benchmark_results.json from the terminal
+├── hpc/
+│   ├── slurm_job.sh                    # Single-scenario HPC job (MPI)
+│   └── slurm_benchmark.sh              # Full benchmark job: all scenarios × all modes (2 nodes × 128 cores)
 ├── simulation/
 │   └── models/
 │       └── EvacuationModel.gaml        # GAMA agent-based evacuation model (4 modes, BPR, batch sweep)
@@ -430,11 +433,14 @@ Full annotated examples: [configs/](configs/)
 # Local test — 2 MPI ranks × 4 workers = 8 cores
 mpirun -n 2 python -m src.main --config configs/demak_flood_2024.yaml --mode hpc --workers 4
 
-# SLURM cluster
+# SLURM — single scenario
 sbatch hpc/slurm_job.sh configs/demak_flood_2024.yaml
 
 # SLURM with hybrid parallelism (4 nodes × 32 cores)
 srun --mpi=pmix -n 4 python -m src.main --config configs/palu_earthquake_2018.yaml --mode hpc --workers 32
+
+# SLURM — full benchmark (all scenarios × all modes, 2 nodes × 128 cores)
+sbatch hpc/slurm_benchmark.sh
 ```
 
 - **Rank 0**: loads OSM data, builds weighted graph, queries InaRISK, broadcasts to all ranks
@@ -475,15 +481,20 @@ python -m experiments.benchmark_all --resume
 
 # Dry-run — print commands without executing
 python -m experiments.benchmark_all --dry-run
+
+# On a SLURM cluster — use srun instead of mpirun for HPC modes
+python -m experiments.benchmark_all --mpi-launcher srun --resume
 ```
 
 **Default execution matrix** (13 modes × N scenarios):
 
-| Category | Variants |
-|---|---|
-| Naive | 1 worker |
-| Parallel | 2, 4, 8, 16, 32, 64 workers |
-| HPC (MPI) | ranks ∈ {2, 4} × workers ∈ {8, 16, 64} |
+| Category | Variants | Cores |
+|---|---|---|
+| Naive | 1 | 1 |
+| Parallel | 2, 4, 8, 16, 32, 64 workers | 2–64 |
+| HPC (MPI) | ranks ∈ {2, 4} × workers ∈ {8, 16, 64} | 16–256 |
+
+The `slurm_benchmark.sh` script extends this to **19 modes** (parallel up to 128w, HPC workers up to 128w) to fill a 2-node × 128-core allocation.
 
 **Outputs** (written to `output/`):
 

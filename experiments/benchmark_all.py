@@ -143,12 +143,16 @@ def _mpi_available() -> bool:
 
 
 def _build_command(
-    scenario_config: Path, mode: dict, village_limit: Optional[int] = None
+    scenario_config: Path, mode: dict, village_limit: Optional[int] = None,
+    mpi_launcher: str = "mpirun",
 ) -> list[str]:
     """Build the subprocess command for a given mode."""
     cmd = []
     if mode.get("mpi_ranks", 1) > 1:
-        cmd += ["mpirun", "-n", str(mode["mpi_ranks"])]
+        if mpi_launcher == "srun":
+            cmd += ["srun", "--mpi=pmix", "-n", str(mode["mpi_ranks"])]
+        else:
+            cmd += ["mpirun", "-n", str(mode["mpi_ranks"])]
     cmd += [
         sys.executable, "-m", "src.main",
         "--config", str(scenario_config),
@@ -165,18 +169,19 @@ def _run_mode(
     timeout_s: int = 3600,
     village_limit: Optional[int] = None,
     dry_run: bool = False,
+    mpi_launcher: str = "mpirun",
 ) -> dict:
     """
     Execute one (scenario, mode) combination.
     Returns a result dict with timings + memory or an error entry.
     """
-    cmd = _build_command(scenario_config, mode, village_limit)
+    cmd = _build_command(scenario_config, mode, village_limit, mpi_launcher=mpi_launcher)
     scenario_id = scenario_config.stem
 
     log.info(
         f"  [{mode['id']}] {scenario_id} — "
         f"{mode['total_cores']} core(s)"
-        + (f" (mpirun -n {mode['n_ranks']})" if mode.get("mpi_ranks", 1) > 1 else "")
+        + (f" ({mpi_launcher} -n {mode['n_ranks']})" if mode.get("mpi_ranks", 1) > 1 else "")
     )
     log.info(f"    cmd: {' '.join(cmd)}")
 
@@ -348,6 +353,11 @@ def main():
         "--skip-mpi", action="store_true",
         help="Skip HPC/MPI runs even if mpi4py is available",
     )
+    parser.add_argument(
+        "--mpi-launcher", choices=["mpirun", "srun"], default="mpirun",
+        help="MPI launcher for HPC runs (default: mpirun). "
+             "Use 'srun' on SLURM clusters with PMIx support.",
+    )
     args = parser.parse_args()
 
     # ---- Resolve scenario list ----
@@ -414,6 +424,7 @@ def main():
                 timeout_s=args.timeout,
                 village_limit=args.benchmark_village_limit,
                 dry_run=args.dry_run,
+                mpi_launcher=args.mpi_launcher,
             )
             n_done += 1
 
