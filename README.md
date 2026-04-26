@@ -1,6 +1,6 @@
 # RespondOR-EvacuationRoute
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](LICENSE)
 
 Research-grade disaster evacuation route optimization system for Indonesia. Integrates OpenStreetMap road networks, InaRISK BNPB hazard data, and multi-objective routing to maximize the number of people evacuated to safe shelters across multiple disaster types and compound hazard scenarios.
 
